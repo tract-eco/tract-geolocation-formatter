@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/plugins/tract_geolocation_formatter" >
+        <file>icon.png</file>
+    </qresource>
+</RCC>
+
