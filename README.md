@@ -4,7 +4,6 @@ A QGIS plugin to **validate, clean, and transform geolocation data** into the **
 
 This plugin is designed for GIS practitioners preparing farm or sourcing-area geometries for sustainability, traceability, and deforestation analysis workflows.
 
----
 
 ## Overview
 
@@ -25,7 +24,6 @@ The **TRACT Geolocation Formatter** provides a guided workflow inside QGIS to:
 
 The plugin works directly on existing QGIS layers and does **not** require advanced GIS scripting knowledge.
 
----
 
 ## Key Features
 
@@ -45,7 +43,6 @@ Designed to be:
 - Reproducible
 - Easy to integrate into existing GIS workflows
 
----
 
 ## Typical Use Cases
 
@@ -57,17 +54,7 @@ Designed to be:
 - General-purpose polygon validation for sustainability and environmental monitoring applications
 
 
----
 
-## Typical Use Cases
-
-- Preparing farm or plot boundaries for sustainability platforms
-- Validating customer-provided geolocation data
-- Pre-checking polygons before deforestation or land-use analysis
-- Cleaning geometries prior to Earth Engine or cloud-based processing
-- Supporting EUDR and supply-chain due diligence workflows
-
----
 
 ## Installation
 
@@ -105,6 +92,7 @@ Steps:
    - Open QGIS
    - Go to Plugins → Manage and Install Plugins
    - Enable TRACT Geolocation Formatter
+
 
 
 ## Development
