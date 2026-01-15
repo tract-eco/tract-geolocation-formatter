@@ -950,6 +950,7 @@ class TractGeolocationFormatter:
         self._log(summary_text)
 
         # Write validation report CSV if there are any validation rows
+        report_path = None
         if validation_rows:
             report_path = os.path.splitext(output_path)[0] + "_validation_report.csv"
 
@@ -971,6 +972,10 @@ class TractGeolocationFormatter:
                     writer.writerow(row)
 
         summary_lines.append(self.tr("Validation report written to: {}").format(report_path))
+
+        # Rebuilds summary text
+        summary_text = "\n".join(summary_lines)
+        self._log(summary_text)
 
         QMessageBox.information(
             self.iface.mainWindow(),

@@ -1,8 +1,8 @@
 [tool.poetry]
-name = "qgis-plugin"
+name = "tract-geolocation-formatter"
 version = "0.1.0"
 description = ""
-authors = ["Your Name <you@example.com>"]
+authors = ["Luis Carrasco luiscartor@gmail.com"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
