@@ -31,6 +31,11 @@ from qgis.PyQt.QtWidgets import (
     QAction,
     QMessageBox,
     QFileDialog,
+    QDialog,
+    QVBoxLayout,
+    QLabel,
+    QPlainTextEdit,
+    QDialogButtonBox,
 )
 
 from qgis.core import (
@@ -442,6 +447,32 @@ class TractGeolocationFormatter:
     # ---------------------------------------------------------------------
     # Main transformation logic
     # ---------------------------------------------------------------------
+
+    # Adding a method to show a detailed report dialog with the summary and logs, instead of just a message box
+    def _show_report_dialog(self, summary_text):
+        """Show a wide, scrollable report dialog."""
+        dialog = QDialog(self.iface.mainWindow())
+        dialog.setWindowTitle(self.tr("TRACT Geolocation Formatter Report"))
+        dialog.resize(1000, 700)
+        dialog.setMinimumSize(850, 600)
+
+        layout = QVBoxLayout(dialog)
+
+        intro_label = QLabel(self.tr("Export summary and geometry repair details"))
+        intro_label.setWordWrap(True)
+        layout.addWidget(intro_label)
+
+        report_text_edit = QPlainTextEdit(dialog)
+        report_text_edit.setReadOnly(True)
+        report_text_edit.setPlainText(summary_text)
+        layout.addWidget(report_text_edit)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok, parent=dialog)
+        button_box.accepted.connect(dialog.accept)
+        layout.addWidget(button_box)
+
+        dialog.exec_()
+
     def _run_transformation_from_dialog(self):
         """Read settings from dialog and run the actual transformation."""
 
@@ -885,7 +916,7 @@ class TractGeolocationFormatter:
             summary_lines.append(self.tr("Geometry repair details:"))
 
             # Limit to 50 features in popup
-            max_display = 50
+            max_display = 500
             display_ids = list(repair_log.keys())[:max_display]
 
             for fid in display_ids:
@@ -901,7 +932,7 @@ class TractGeolocationFormatter:
         if invalid_features:
             summary_lines.append("")
             summary_lines.append(self.tr("Examples of skipped features:"))
-            for fid, reason in invalid_features[:10]:
+            for fid, reason in invalid_features[:500]:
                 summary_lines.append("  FID {}: {}".format(fid, reason))
 
 
@@ -914,14 +945,14 @@ class TractGeolocationFormatter:
                 summary_lines.append(
                     self.tr("Polygons below minimum area ({} ha):").format(MIN_PLOT_AREA_HA)
                 )
-                for fid, area in small_area_features[:10]:
+                for fid, area in small_area_features[:500]:
                     summary_lines.append(
                         f"  - {_feature_label(fid)}: {area:.4f} ha"
                     )
 
-                if len(small_area_features) > 10:
+                if len(small_area_features) > 500:
                     summary_lines.append(
-                        f"  ... and {len(small_area_features) - 10} more polygons."
+                        f"  ... and {len(small_area_features) - 500} more polygons."
                     )
 
             if polygon_hole_features:
@@ -930,14 +961,14 @@ class TractGeolocationFormatter:
                     self.tr("Polygons with interior holes detected:")
                 )
 
-                for fid in polygon_hole_features[:10]:
+                for fid in polygon_hole_features[:500]:
                     summary_lines.append(
                         f"  - {_feature_label(fid)}"
                     )
 
-                if len(polygon_hole_features) > 10:
+                if len(polygon_hole_features) > 500:
                     summary_lines.append(
-                        f"  ... and {len(polygon_hole_features) - 10} more polygons."
+                        f"  ... and {len(polygon_hole_features) - 500} more polygons."
                     )
 
                 summary_lines.append(
@@ -977,8 +1008,4 @@ class TractGeolocationFormatter:
         summary_text = "\n".join(summary_lines)
         self._log(summary_text)
 
-        QMessageBox.information(
-            self.iface.mainWindow(),
-            self.tr("TRACT Geolocation Formatter"),
-            summary_text,
-        )
+        self._show_report_dialog(summary_text)
