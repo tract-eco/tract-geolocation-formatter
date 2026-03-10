@@ -22,6 +22,8 @@ The **TRACT Geolocation Formatter** provides a guided workflow inside QGIS to:
 - Standardize geolocation files into TRACT’s expected GeoJSON structure
 - Reduce back-and-forth between data providers and platform ingestion
 
+Before validation and processing, the plugin **rounds all geometry coordinates to six decimal places**. This precision level aligns with the coordinate format used in the EU TRACES system, helping avoid geometry inconsistencies caused by excessive decimal precision.
+
 The plugin works directly on existing QGIS layers and does **not** require advanced GIS scripting knowledge.
 
 
@@ -32,7 +34,13 @@ The plugin works directly on existing QGIS layers and does **not** require advan
   - Node ID
   - Plot ID
 - Ensure consistent schema structure across all features
+- Standardize coordinate precision by rounding geometries to six decimal places
 - Validate polygon geometries (e.g. self-intersections, invalid rings)
+- Remove consecutive duplicate vertices
+- Repair invalid geometries using makeValid
+- Detect polygons containing interior holes
+- Validate minimum polygon area requirements
+- Automatically reproject geometries to EPSG:4326
 - Identify intersecting or overlapping line segments
 - Detect and flag common geometry issues before export
 - Export ready-to-upload GeoJSON files for the TRACT platform
@@ -42,6 +50,27 @@ Designed to be:
 - Lightweight
 - Reproducible
 - Easy to integrate into existing GIS workflows
+
+## Output Files
+
+The plugin produces two outputs:
+
+1. Clean GeoJSON file
+
+A TRACT-compatible GeoJSON file containing validated and standardized geometries ready for upload to the TRACT platform.
+
+2. Validation report
+
+A CSV validation report summarizing geometry checks and fixes applied during processing.
+
+The report includes:
+- Feature identifiers
+- NodeID and PlotID values
+- Validation status (Warning or Error)
+- Issue type
+- Descriptive messages explaining detected issues or applied repairs
+
+This report helps users quickly identify and correct problematic geometries before submitting data.
 
 
 ## Typical Use Cases
