@@ -58,6 +58,7 @@ from .TRACT_Geolocation_Formatter_dialog import TractGeolocationFormatterDialog
 # Constants for Minimum Area Checks
 MIN_PLOT_AREA_HA = 0.05
 AREA_CRS = QgsCoordinateReferenceSystem("EPSG:6933")  # Equal-area CRS
+COORD_DECIMALS = 6
 
 
 class TractGeolocationFormatter:
@@ -321,6 +322,48 @@ class TractGeolocationFormatter:
     # ---------------------------------------------------------------------
     # Geometries helper functions
     # ---------------------------------------------------------------------
+    
+    def _round_geometry_coordinates(self, geom: QgsGeometry, decimals: int = 6) -> QgsGeometry:
+        """
+        Round all polygon / multipolygon coordinates to the given number of decimals.
+        Returns a new QgsGeometry.
+        """
+        if geom.isEmpty():
+            return geom
+
+        from qgis.core import QgsPointXY, QgsGeometry
+
+        def round_ring(ring):
+            rounded = []
+            for pt in ring:
+                rounded.append(QgsPointXY(round(pt.x(), decimals), round(pt.y(), decimals)))
+            return rounded
+
+        # Polygon
+        if not geom.isMultipart():
+            poly = geom.asPolygon()
+            if not poly:
+                return geom
+
+            rounded_poly = []
+            for ring in poly:
+                rounded_poly.append(round_ring(ring))
+
+            return QgsGeometry.fromPolygonXY(rounded_poly)
+
+        # MultiPolygon
+        mp = geom.asMultiPolygon()
+        if not mp:
+            return geom
+
+        rounded_mp = []
+        for poly in mp:
+            rounded_poly = []
+            for ring in poly:
+                rounded_poly.append(round_ring(ring))
+            rounded_mp.append(rounded_poly)
+
+        return QgsGeometry.fromMultiPolygonXY(rounded_mp)
 
     def _fix_duplicate_vertices(self, geom: QgsGeometry) -> QgsGeometry:
         """
@@ -659,14 +702,78 @@ class TractGeolocationFormatter:
                 continue
 
             if not geom.isGeosValid():
-                # Try to makeValid as a best-effort fix
                 fixed = geom.makeValid()
                 if fixed.isEmpty() or not fixed.isGeosValid():
                     invalid_features.append((f.id(), "Invalid geometry (cannot make valid)"))
                     continue
                 geom = fixed
 
-            # Duplicate vertex check: only consecutive duplicates are problematic.
+            # --- Z-value removal ---
+            if self._has_z_values(geom):
+                if f.id() not in repair_log:
+                    repair_log[f.id()] = []
+                repair_log[f.id()].append("Removed Z values")
+
+                node_id, plot_id = self._get_ids(
+                    f,
+                    layer,
+                    node_use_existing,
+                    node_field_name,
+                    plot_existing,
+                    plot_field_name,
+                )
+
+                validation_rows.append({
+                    "feature_id": f.id(),
+                    "NodeID": node_id,
+                    "PlotID": plot_id,
+                    "status": "WARNING",
+                    "issue_type": "z_values",
+                    "message": "Removed Z values"
+                })
+                # geom = self._drop_z_values(geom)  # still not needed because writer is 2D
+
+            # Reproject to EPSG:4326 first
+            if coord_transform is not None:
+                try:
+                    geom.transform(coord_transform)
+                except Exception as e:
+                    invalid_features.append((f.id(), "Reprojection error: {}".format(e)))
+                    continue
+
+            # Round coordinates once, after reprojection, before checks
+            rounded_geom = self._round_geometry_coordinates(geom, COORD_DECIMALS)
+
+            if rounded_geom.isEmpty():
+                invalid_features.append((f.id(), "Geometry became empty after coordinate rounding"))
+                continue
+
+            if not rounded_geom.equals(geom):
+                if f.id() not in repair_log:
+                    repair_log[f.id()] = []
+                repair_log[f.id()].append(f"Rounded coordinates to {COORD_DECIMALS} decimals")
+
+                node_id, plot_id = self._get_ids(
+                    f,
+                    layer,
+                    node_use_existing,
+                    node_field_name,
+                    plot_existing,
+                    plot_field_name,
+                )
+
+                validation_rows.append({
+                    "feature_id": f.id(),
+                    "NodeID": node_id,
+                    "PlotID": plot_id,
+                    "status": "WARNING",
+                    "issue_type": "coordinate_rounding",
+                    "message": f"Rounded coordinates to {COORD_DECIMALS} decimals"
+                })
+
+            geom = rounded_geom
+
+            # Duplicate vertex check after rounding, because rounding can create duplicates
             coords = [(v.x(), v.y()) for v in geom.vertices()]
             has_bad_duplicates = False
             for i in range(len(coords) - 1):
@@ -676,14 +783,12 @@ class TractGeolocationFormatter:
 
             if has_bad_duplicates:
                 self._log(f"Fixing consecutive duplicate vertices in feature {f.id()}...")
-                
-                # Initialize list for this feature if missing
+
                 if f.id() not in repair_log:
                     repair_log[f.id()] = []
 
                 repair_log[f.id()].append("Removed consecutive duplicate vertices")
-                
-                # Also record in validation rows
+
                 node_id, plot_id = self._get_ids(
                     f,
                     layer,
@@ -703,49 +808,10 @@ class TractGeolocationFormatter:
                 })
 
                 geom = self._fix_duplicate_vertices(geom)
-                # Recheck validity
+
                 if geom.isEmpty() or not geom.isGeosValid():
                     invalid_features.append((f.id(), "Duplicate-vertex fix failed (invalid geometry)"))
                     continue
-
-            # --- Z-value removal ---
-            if self._has_z_values(geom):
-                # record the repair
-                if f.id() not in repair_log:
-                    repair_log[f.id()] = []
-                repair_log[f.id()].append("Removed Z values")
-
-                # Also record in validation rows
-                node_id, plot_id = self._get_ids(
-                    f,
-                    layer,
-                    node_use_existing,
-                    node_field_name,
-                    plot_existing,
-                    plot_field_name,
-                )
-
-                validation_rows.append({
-                    "feature_id": f.id(),
-                    "NodeID": node_id,
-                    "PlotID": plot_id,
-                    "status": "WARNING",
-                    "issue_type": "z_values",
-                    "message": "Removed Z values"
-                })
-                # drop the Z values
-                #geom = self._drop_z_values(geom)
-
-
-            # Reproject if needed
-            if coord_transform is not None:
-                try:
-                    geom.transform(coord_transform)
-                except Exception as e:
-                    invalid_features.append((f.id(), "Reprojection error: {}".format(e)))
-                    continue
-
-            new_feat = QgsFeature(out_fields)
 
             # Minimum area check
             try:
@@ -820,6 +886,7 @@ class TractGeolocationFormatter:
 
                 continue
 
+            new_feat = QgsFeature(out_fields)
 
 
             # NodeID
