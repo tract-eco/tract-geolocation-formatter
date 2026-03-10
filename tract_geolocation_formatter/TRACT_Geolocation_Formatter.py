@@ -1008,14 +1008,13 @@ class TractGeolocationFormatter:
             summary_lines.append("")
             summary_lines.append(self.tr("Geometry repair details:"))
 
-            # Limit to 50 features in popup
             max_display = 500
             display_ids = list(repair_log.keys())[:max_display]
 
             for fid in display_ids:
                 messages = repair_log[fid]
                 for msg in messages:
-                    summary_lines.append(f"  - Feature {fid}: {msg}")
+                    summary_lines.append(f"  - {_feature_label(fid)}: {msg}")
 
             if len(repair_log) > max_display:
                 summary_lines.append(
