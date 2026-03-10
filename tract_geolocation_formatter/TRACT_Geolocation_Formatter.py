@@ -267,11 +267,16 @@ class TractGeolocationFormatter:
         # Populate field combos based on current layer
         self._populate_field_combos()
 
-        # When user changes layer, refresh field combos
-        self.dlg.layerComboBox.currentIndexChanged.connect(self._populate_field_combos)
-
-        # Make some sensible defaults for NodeID / PlotID fields
+        # Apply default field selections
         self._select_default_fields()
+
+        # When user changes layer, refresh combos AND defaults
+        try:
+            self.dlg.layerComboBox.currentIndexChanged.disconnect()
+        except Exception:
+            pass
+
+        self.dlg.layerComboBox.currentIndexChanged.connect(self._on_layer_changed)
 
     def _populate_field_combos(self):
         """Populate NodeID and PlotID field comboboxes from selected layer."""
@@ -288,6 +293,12 @@ class TractGeolocationFormatter:
         self.dlg.nodeFieldCombo.addItems(field_names)
         self.dlg.plotFieldCombo.addItems(field_names)
 
+    def _on_layer_changed(self):
+        """Refresh field combos and apply default selections when layer changes."""
+        self._populate_field_combos()
+        self._select_default_fields()
+
+
     def _select_default_fields(self):
         """Try to preselect sensible NodeID / PlotID fields."""
         idx = self.dlg.layerComboBox.currentIndex()
@@ -296,15 +307,33 @@ class TractGeolocationFormatter:
 
         layer = self._polygon_layers[idx]
         field_names = [f.name() for f in layer.fields()]
+        field_names_lower = [name.lower().strip() for name in field_names]
 
-        def set_combo_default(combo, candidates):
-            for i, name in enumerate(field_names):
-                if name.lower() in candidates:
-                    combo.setCurrentIndex(i)
-                    return
+        def find_field(candidates):
+            for candidate in candidates:
+                for i, name in enumerate(field_names_lower):
+                    if name == candidate:
+                        return i
+            return -1
 
-        set_combo_default(self.dlg.nodeFieldCombo, ("nodeid", "node_id", "id"))
-        set_combo_default(self.dlg.plotFieldCombo, ("plotid", "plot_id", "plot"))
+        # ---- NodeID ----
+        node_idx = find_field(["nodeid", "node_id"])
+
+        if node_idx == -1:
+            node_idx = find_field(["id"])  # fallback only
+
+        if node_idx != -1:
+            self.dlg.nodeExistingRadio.setChecked(True)
+            self.dlg.nodeFieldCombo.setCurrentIndex(node_idx)
+
+        # ---- PlotID ----
+        plot_idx = find_field(["plotid", "plot_id", "plot"])
+
+        if plot_idx != -1:
+            self.dlg.plotExistingRadio.setChecked(True)
+            self.dlg.plotFieldCombo.setCurrentIndex(plot_idx)
+        else:
+            self.dlg.plotNoneRadio.setChecked(True)
 
     def _browse_output_path(self):
         """Open a file dialog to choose output GeoJSON path."""
