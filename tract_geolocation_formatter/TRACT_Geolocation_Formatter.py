@@ -654,6 +654,20 @@ class TractGeolocationFormatter:
             output_path += ".geojson"
             self.dlg.outputPathLineEdit.setText(output_path)
 
+        # Check if output file already exists - ask user to confirm overwrite;
+        # Commented for now to avoid double checking this after accepting in 'browse' dialog, but can be re-enabled if we want an extra safety check before export
+        # if os.path.exists(output_path):
+        #     reply = QMessageBox.question(
+        #         self.iface.mainWindow(),
+        #         self.tr("Replace existing file?"),
+        #         self.tr(
+        #             "The output file already exists:\n\n{}\n\nDo you want to replace it?"
+        #         ).format(output_path),
+        #         QMessageBox.Yes | QMessageBox.No,
+        #         QMessageBox.No,
+        #     )
+        #     if reply != QMessageBox.Yes:
+        #         return
 
 
         self._log(self.tr("Starting TRACT GeoJSON export..."))
