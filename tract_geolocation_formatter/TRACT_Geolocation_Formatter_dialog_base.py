@@ -148,4 +148,4 @@ class Ui_TractGeolocationFormatterDialogBase(object):
         self.outputGroupBox.setTitle(_translate("TractGeolocationFormatterDialogBase", "Output"))
         self.outputPathLabel.setText(_translate("TractGeolocationFormatterDialogBase", "Output GeoJSON:"))
         self.outputBrowseButton.setText(_translate("TractGeolocationFormatterDialogBase", "Browse…"))
-        self.logGroupBox.setTitle(_translate("TractGeolocationFormatterDialogBase", "Summary / log"))
+        self.logGroupBox.setTitle(_translate("TractGeolocationFormatterDialogBase", "Tool Description"))

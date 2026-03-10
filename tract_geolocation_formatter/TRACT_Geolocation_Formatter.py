@@ -241,7 +241,6 @@ class TractGeolocationFormatter:
 
     def _populate_dialog(self):
         """Fill layer combo, field combos and default options."""
-        self.dlg.logTextEdit.appendPlainText("\n--- Running transformation ---\n")
 
         # Populate layer combo
         self._polygon_layers = self._polygon_vector_layers()
@@ -655,15 +654,6 @@ class TractGeolocationFormatter:
             output_path += ".geojson"
             self.dlg.outputPathLineEdit.setText(output_path)
 
-        # self.dlg.logTextEdit.clear()
-        self.dlg.logTextEdit.setPlainText(
-            "This tool converts polygon geometries into TRACT's standard geolocation format.\n\n"
-            "Automatic fixes applied:\n"
-            "- Removal of consecutive duplicate vertices\n"
-            "- Geometry validation (makeValid)\n"
-            "- Reprojection to EPSG:4326\n\n"
-            "Specify NodeID / PlotID and export to a TRACT-ready GeoJSON."
-        )
 
 
         self._log(self.tr("Starting TRACT GeoJSON export..."))
