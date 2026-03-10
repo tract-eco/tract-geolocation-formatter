@@ -25,7 +25,7 @@
 import os
 import re
 
-from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, QVariant
+from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, QVariant, Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import (
     QAction,
@@ -36,6 +36,8 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QDialogButtonBox,
+    QProgressBar,
+    QApplication
 )
 
 from qgis.core import (
@@ -50,6 +52,7 @@ from qgis.core import (
     QgsGeometry,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
+    Qgis
 )
 
 from .resources_rc import *
@@ -516,6 +519,7 @@ class TractGeolocationFormatter:
 
         dialog.exec_()
 
+
     def _run_transformation_from_dialog(self):
         """Read settings from dialog and run the actual transformation."""
 
@@ -693,234 +697,256 @@ class TractGeolocationFormatter:
         features = list(layer.getFeatures())
         features.sort(key=lambda x: x.id())  # deterministic ordering
 
-        for f in features:
+        total_features = len(features)
 
-            total_count += 1
-            geom = QgsGeometry(f.geometry())
-            if geom.isEmpty():
-                invalid_features.append((f.id(), "Empty geometry"))
-                continue
+        # Create progress bar in QGIS message bar
+        progress_message = self.iface.messageBar().createMessage(
+            "TRACT Geolocation Formatter",
+            "Processing features..."
+        )
+        progress = QProgressBar()
+        progress.setMaximum(total_features)
+        progress.setValue(0)
+        progress.setFormat("%v / %m")
+        progress.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        progress_message.layout().addWidget(progress)
+        progress_item = self.iface.messageBar().pushWidget(progress_message, Qgis.Info)
 
-            if not geom.isGeosValid():
-                fixed = geom.makeValid()
-                if fixed.isEmpty() or not fixed.isGeosValid():
-                    invalid_features.append((f.id(), "Invalid geometry (cannot make valid)"))
-                    continue
-                geom = fixed
+        try:
+            for i, f in enumerate(features, start=1):
+                progress.setValue(i)
+                QApplication.processEvents()
 
-            # --- Z-value removal ---
-            if self._has_z_values(geom):
-                if f.id() not in repair_log:
-                    repair_log[f.id()] = []
-                repair_log[f.id()].append("Removed Z values")
-
-                node_id, plot_id = self._get_ids(
-                    f,
-                    layer,
-                    node_use_existing,
-                    node_field_name,
-                    plot_existing,
-                    plot_field_name,
-                )
-
-                validation_rows.append({
-                    "feature_id": f.id(),
-                    "NodeID": node_id,
-                    "PlotID": plot_id,
-                    "status": "WARNING",
-                    "issue_type": "z_values",
-                    "message": "Removed Z values"
-                })
-                # geom = self._drop_z_values(geom)  # still not needed because writer is 2D
-
-            # Reproject to EPSG:4326 first
-            if coord_transform is not None:
-                try:
-                    geom.transform(coord_transform)
-                except Exception as e:
-                    invalid_features.append((f.id(), "Reprojection error: {}".format(e)))
+                total_count += 1
+                geom = QgsGeometry(f.geometry())
+                if geom.isEmpty():
+                    invalid_features.append((f.id(), "Empty geometry"))
                     continue
 
-            # Round coordinates once, after reprojection, before checks
-            rounded_geom = self._round_geometry_coordinates(geom, COORD_DECIMALS)
+                if not geom.isGeosValid():
+                    fixed = geom.makeValid()
+                    if fixed.isEmpty() or not fixed.isGeosValid():
+                        invalid_features.append((f.id(), "Invalid geometry (cannot make valid)"))
+                        continue
+                    geom = fixed
 
-            if rounded_geom.isEmpty():
-                invalid_features.append((f.id(), "Geometry became empty after coordinate rounding"))
-                continue
+                # --- Z-value removal ---
+                if self._has_z_values(geom):
+                    if f.id() not in repair_log:
+                        repair_log[f.id()] = []
+                    repair_log[f.id()].append("Removed Z values")
 
-            if not rounded_geom.equals(geom):
-                if f.id() not in repair_log:
-                    repair_log[f.id()] = []
-                repair_log[f.id()].append(f"Rounded coordinates to {COORD_DECIMALS} decimals")
+                    node_id, plot_id = self._get_ids(
+                        f,
+                        layer,
+                        node_use_existing,
+                        node_field_name,
+                        plot_existing,
+                        plot_field_name,
+                    )
 
-                node_id, plot_id = self._get_ids(
-                    f,
-                    layer,
-                    node_use_existing,
-                    node_field_name,
-                    plot_existing,
-                    plot_field_name,
-                )
+                    validation_rows.append({
+                        "feature_id": f.id(),
+                        "NodeID": node_id,
+                        "PlotID": plot_id,
+                        "status": "WARNING",
+                        "issue_type": "z_values",
+                        "message": "Removed Z values"
+                    })
 
-                validation_rows.append({
-                    "feature_id": f.id(),
-                    "NodeID": node_id,
-                    "PlotID": plot_id,
-                    "status": "WARNING",
-                    "issue_type": "coordinate_rounding",
-                    "message": f"Rounded coordinates to {COORD_DECIMALS} decimals"
-                })
+                # Reproject to EPSG:4326 first
+                if coord_transform is not None:
+                    try:
+                        geom.transform(coord_transform)
+                    except Exception as e:
+                        invalid_features.append((f.id(), "Reprojection error: {}".format(e)))
+                        continue
 
-            geom = rounded_geom
+                # Round coordinates once, after reprojection, before checks
+                rounded_geom = self._round_geometry_coordinates(geom, COORD_DECIMALS)
 
-            # Duplicate vertex check after rounding, because rounding can create duplicates
-            coords = [(v.x(), v.y()) for v in geom.vertices()]
-            has_bad_duplicates = False
-            for i in range(len(coords) - 1):
-                if coords[i] == coords[i + 1]:
-                    has_bad_duplicates = True
-                    break
-
-            if has_bad_duplicates:
-                self._log(f"Fixing consecutive duplicate vertices in feature {f.id()}...")
-
-                if f.id() not in repair_log:
-                    repair_log[f.id()] = []
-
-                repair_log[f.id()].append("Removed consecutive duplicate vertices")
-
-                node_id, plot_id = self._get_ids(
-                    f,
-                    layer,
-                    node_use_existing,
-                    node_field_name,
-                    plot_existing,
-                    plot_field_name,
-                )
-
-                validation_rows.append({
-                    "feature_id": f.id(),
-                    "NodeID": node_id,
-                    "PlotID": plot_id,
-                    "status": "WARNING",
-                    "issue_type": "duplicate_vertices",
-                    "message": "Removed consecutive duplicate vertices"
-                })
-
-                geom = self._fix_duplicate_vertices(geom)
-
-                if geom.isEmpty() or not geom.isGeosValid():
-                    invalid_features.append((f.id(), "Duplicate-vertex fix failed (invalid geometry)"))
+                if rounded_geom.isEmpty():
+                    invalid_features.append((f.id(), "Geometry became empty after coordinate rounding"))
                     continue
 
-            # Minimum area check
-            try:
-                area_geom = QgsGeometry(geom)
-                area_geom.transform(area_transform)
-                area_m2 = area_geom.area()
-                area_ha = area_m2 / 10000.0
-            except Exception as e:
-                invalid_features.append((f.id(), f"Area computation failed: {e}"))
-                continue
+                if not rounded_geom.equals(geom):
+                    if f.id() not in repair_log:
+                        repair_log[f.id()] = []
+                    repair_log[f.id()].append(f"Rounded coordinates to {COORD_DECIMALS} decimals")
 
-            if area_ha < MIN_PLOT_AREA_HA:
-                small_area_features.append((f.id(), area_ha))
+                    node_id, plot_id = self._get_ids(
+                        f,
+                        layer,
+                        node_use_existing,
+                        node_field_name,
+                        plot_existing,
+                        plot_field_name,
+                    )
 
-                # Also record in validation rows
-                node_id, plot_id = self._get_ids(
-                    f,
-                    layer,
-                    node_use_existing,
-                    node_field_name,
-                    plot_existing,
-                    plot_field_name,
-                )
+                    validation_rows.append({
+                        "feature_id": f.id(),
+                        "NodeID": node_id,
+                        "PlotID": plot_id,
+                        "status": "WARNING",
+                        "issue_type": "coordinate_rounding",
+                        "message": f"Rounded coordinates to {COORD_DECIMALS} decimals"
+                    })
 
-                validation_rows.append({
-                    "feature_id": f.id(),
-                    "NodeID": node_id,
-                    "PlotID": plot_id,
-                    "status": "ERROR",
-                    "issue_type": "small_area",
-                    "message": f"Area below minimum ({area_ha:.4f} ha < {MIN_PLOT_AREA_HA} ha)"
-                })
+                geom = rounded_geom
 
-                continue
-
-            
-            # Polygon holes detection (report only)
-            has_holes = False
-
-            if geom.isMultipart():
-                multipoly = geom.asMultiPolygon()
-                for poly in multipoly:
-                    if len(poly) > 1:  # exterior ring + one or more interior rings
-                        has_holes = True
+                # Duplicate vertex check after rounding, because rounding can create duplicates
+                coords = [(v.x(), v.y()) for v in geom.vertices()]
+                has_bad_duplicates = False
+                for j in range(len(coords) - 1):
+                    if coords[j] == coords[j + 1]:
+                        has_bad_duplicates = True
                         break
-            else:
-                poly = geom.asPolygon()
-                if poly and len(poly) > 1:
-                    has_holes = True
 
-            if has_holes:
-                polygon_hole_features.append(f.id())
+                if has_bad_duplicates:
+                    self._log(f"Fixing consecutive duplicate vertices in feature {f.id()}...")
 
-                # Also record in validation rows
-                node_id, plot_id = self._get_ids(
-                    f,
-                    layer,
-                    node_use_existing,
-                    node_field_name,
-                    plot_existing,
-                    plot_field_name,
-                )
+                    if f.id() not in repair_log:
+                        repair_log[f.id()] = []
 
-                validation_rows.append({
-                    "feature_id": f.id(),
-                    "NodeID": node_id,
-                    "PlotID": plot_id,
-                    "status": "ERROR",
-                    "issue_type": "polygon_holes",
-                    "message": "Polygon contains interior holes"
-                })
+                    repair_log[f.id()].append("Removed consecutive duplicate vertices")
 
-                continue
+                    node_id, plot_id = self._get_ids(
+                        f,
+                        layer,
+                        node_use_existing,
+                        node_field_name,
+                        plot_existing,
+                        plot_field_name,
+                    )
 
-            new_feat = QgsFeature(out_fields)
+                    validation_rows.append({
+                        "feature_id": f.id(),
+                        "NodeID": node_id,
+                        "PlotID": plot_id,
+                        "status": "WARNING",
+                        "issue_type": "duplicate_vertices",
+                        "message": "Removed consecutive duplicate vertices"
+                    })
 
+                    geom = self._fix_duplicate_vertices(geom)
 
-            # NodeID
-            if node_use_existing:
-                attrs = f.attributes()
-                node_idx = layer.fields().indexFromName(node_field_name)
-                val = attrs[node_idx] if node_idx != -1 else None
-                new_feat["NodeID"] = "" if val is None else str(val)
+                    if geom.isEmpty() or not geom.isGeosValid():
+                        invalid_features.append((f.id(), "Duplicate-vertex fix failed (invalid geometry)"))
+                        continue
 
-            else:  # auto-generate
-                new_feat["NodeID"] = f"{node_prefix}{written_count + 1}"
+                # Minimum area check
+                try:
+                    area_geom = QgsGeometry(geom)
+                    area_geom.transform(area_transform)
+                    area_m2 = area_geom.area()
+                    area_ha = area_m2 / 10000.0
+                except Exception as e:
+                    invalid_features.append((f.id(), f"Area computation failed: {e}"))
+                    continue
 
-            # PlotID
-            if plot_none:
-                new_feat["PlotID"] = ""
-            elif plot_existing and plot_field_name:
-                attrs = f.attributes()
-                plot_idx = layer.fields().indexFromName(plot_field_name)
-                val = attrs[plot_idx] if plot_idx != -1 else None
-                new_feat["PlotID"] = "" if val is None else str(val)
-            elif plot_auto:
-                new_feat["PlotID"] = "{}{}".format(plot_prefix, written_count + 1)
-            else:
-                new_feat["PlotID"] = ""
+                if area_ha < MIN_PLOT_AREA_HA:
+                    small_area_features.append((f.id(), area_ha))
 
-            new_feat.setGeometry(geom)
+                    node_id, plot_id = self._get_ids(
+                        f,
+                        layer,
+                        node_use_existing,
+                        node_field_name,
+                        plot_existing,
+                        plot_field_name,
+                    )
 
-            if not writer.addFeature(new_feat):
-                invalid_features.append((f.id(), "Failed to write feature to output"))
-                continue
+                    validation_rows.append({
+                        "feature_id": f.id(),
+                        "NodeID": node_id,
+                        "PlotID": plot_id,
+                        "status": "ERROR",
+                        "issue_type": "small_area",
+                        "message": f"Area below minimum ({area_ha:.4f} ha < {MIN_PLOT_AREA_HA} ha)"
+                    })
 
-            written_count += 1
+                    continue
+
+                # Polygon holes detection (report only)
+                has_holes = False
+
+                if geom.isMultipart():
+                    multipoly = geom.asMultiPolygon()
+                    for poly in multipoly:
+                        if len(poly) > 1:  # exterior ring + one or more interior rings
+                            has_holes = True
+                            break
+                else:
+                    poly = geom.asPolygon()
+                    if poly and len(poly) > 1:
+                        has_holes = True
+
+                if has_holes:
+                    polygon_hole_features.append(f.id())
+
+                    node_id, plot_id = self._get_ids(
+                        f,
+                        layer,
+                        node_use_existing,
+                        node_field_name,
+                        plot_existing,
+                        plot_field_name,
+                    )
+
+                    validation_rows.append({
+                        "feature_id": f.id(),
+                        "NodeID": node_id,
+                        "PlotID": plot_id,
+                        "status": "ERROR",
+                        "issue_type": "polygon_holes",
+                        "message": "Polygon contains interior holes"
+                    })
+
+                    continue
+
+                new_feat = QgsFeature(out_fields)
+
+                # NodeID
+                if node_use_existing:
+                    attrs = f.attributes()
+                    node_idx = layer.fields().indexFromName(node_field_name)
+                    val = attrs[node_idx] if node_idx != -1 else None
+                    new_feat["NodeID"] = "" if val is None else str(val)
+                else:
+                    new_feat["NodeID"] = f"{node_prefix}{written_count + 1}"
+
+                # PlotID
+                if plot_none:
+                    new_feat["PlotID"] = ""
+                elif plot_existing and plot_field_name:
+                    attrs = f.attributes()
+                    plot_idx = layer.fields().indexFromName(plot_field_name)
+                    val = attrs[plot_idx] if plot_idx != -1 else None
+                    new_feat["PlotID"] = "" if val is None else str(val)
+                elif plot_auto:
+                    new_feat["PlotID"] = "{}{}".format(plot_prefix, written_count + 1)
+                else:
+                    new_feat["PlotID"] = ""
+
+                new_feat.setGeometry(geom)
+
+                if not writer.addFeature(new_feat):
+                    invalid_features.append((f.id(), "Failed to write feature to output"))
+                    continue
+
+                written_count += 1
+
+        finally:
+            self.iface.messageBar().popWidget(progress_item)
 
         del writer  # flush
+
+        self.iface.messageBar().pushMessage(
+            "TRACT Geolocation Formatter",
+            f"Finished processing {total_count} features.",
+            level=Qgis.Success,
+            duration=3
+        )
 
         # # Log small area features
         # if small_area_features:
@@ -1069,7 +1095,8 @@ class TractGeolocationFormatter:
                 for row in validation_rows:
                     writer.writerow(row)
 
-        summary_lines.append(self.tr("Validation report written to: {}").format(report_path))
+        if report_path:
+            summary_lines.append(self.tr("Validation report written to: {}").format(report_path))
 
         # Rebuilds summary text
         summary_text = "\n".join(summary_lines)
