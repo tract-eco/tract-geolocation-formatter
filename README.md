@@ -102,7 +102,7 @@ Steps:
 
 1. Clone or download this repository:
 
-   git clone https://github.com/<your-org-or-username>/tract-geolocation-formatter.git
+   git clone https://github.com/tract-eco/tract-geolocation-formatter.git
 
 2. Copy the plugin folder (tract_geolocation_formatter) into your local QGIS plugins directory:
 

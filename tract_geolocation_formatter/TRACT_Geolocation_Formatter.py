@@ -24,6 +24,8 @@
 
 import os
 import re
+import json
+from shapely.geometry import shape
 
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, QVariant, Qt
 from qgis.PyQt.QtGui import QIcon
@@ -52,7 +54,8 @@ from qgis.core import (
     QgsGeometry,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
-    Qgis
+    Qgis,
+    QgsVectorLayer
 )
 
 from .resources_rc import *
@@ -354,21 +357,32 @@ class TractGeolocationFormatter:
     # Geometries helper functions
     # ---------------------------------------------------------------------
     
-    def _round_geometry_coordinates(self, geom: QgsGeometry, decimals: int = 6) -> QgsGeometry:
+    def _truncate_geometry_coordinates(self, geom: QgsGeometry, decimals: int = 6) -> QgsGeometry:
         """
-        Round all polygon / multipolygon coordinates to the given number of decimals.
+        Truncate all polygon / multipolygon coordinates to the given number of decimals
+        (no rounding).
         Returns a new QgsGeometry.
         """
         if geom.isEmpty():
             return geom
 
         from qgis.core import QgsPointXY, QgsGeometry
+        import math
 
-        def round_ring(ring):
-            rounded = []
+        def truncate(value, decimals):
+            factor = 10 ** decimals
+            return math.trunc(value * factor) / factor
+
+        def truncate_ring(ring):
+            truncated = []
             for pt in ring:
-                rounded.append(QgsPointXY(round(pt.x(), decimals), round(pt.y(), decimals)))
-            return rounded
+                truncated.append(
+                    QgsPointXY(
+                        truncate(pt.x(), decimals),
+                        truncate(pt.y(), decimals)
+                    )
+                )
+            return truncated
 
         # Polygon
         if not geom.isMultipart():
@@ -376,25 +390,25 @@ class TractGeolocationFormatter:
             if not poly:
                 return geom
 
-            rounded_poly = []
+            truncated_poly = []
             for ring in poly:
-                rounded_poly.append(round_ring(ring))
+                truncated_poly.append(truncate_ring(ring))
 
-            return QgsGeometry.fromPolygonXY(rounded_poly)
+            return QgsGeometry.fromPolygonXY(truncated_poly)
 
         # MultiPolygon
         mp = geom.asMultiPolygon()
         if not mp:
             return geom
 
-        rounded_mp = []
+        truncated_mp = []
         for poly in mp:
-            rounded_poly = []
+            truncated_poly = []
             for ring in poly:
-                rounded_poly.append(round_ring(ring))
-            rounded_mp.append(rounded_poly)
+                truncated_poly.append(truncate_ring(ring))
+            truncated_mp.append(truncated_poly)
 
-        return QgsGeometry.fromMultiPolygonXY(rounded_mp)
+        return QgsGeometry.fromMultiPolygonXY(truncated_mp)
 
     def _fix_duplicate_vertices(self, geom: QgsGeometry) -> QgsGeometry:
         """
@@ -480,7 +494,162 @@ class TractGeolocationFormatter:
 
         return node_val, plot_val
 
+    # Helper for after makeValid, to ensure we only keep polygonal parts if we end up with a GeometryCollection
+    def _extract_polygonal_geometry(self, geom: QgsGeometry) -> QgsGeometry:
+        """
+        Ensure the geometry is polygonal.
+        If makeValid() returns a GeometryCollection, extract polygon parts only.
+        Returns an empty geometry if no polygonal part can be recovered.
+        """
+        if geom.isEmpty():
+            return geom
 
+        wkb_type = geom.wkbType()
+        geom_type = QgsWkbTypes.geometryType(wkb_type)
+
+        # Already polygonal
+        if geom_type == QgsWkbTypes.PolygonGeometry:
+            return geom
+
+        # Try to extract polygon parts from geometry collections
+        parts = []
+        try:
+            for part in geom.constParts():
+                part_geom = QgsGeometry(part.clone())
+                if QgsWkbTypes.geometryType(part_geom.wkbType()) == QgsWkbTypes.PolygonGeometry:
+                    parts.append(part_geom)
+        except Exception:
+            return QgsGeometry()
+
+        if not parts:
+            return QgsGeometry()
+
+        if len(parts) == 1:
+            return parts[0]
+
+        # Merge polygon parts into a multipolygon if possible
+        collected = []
+        for part_geom in parts:
+            if part_geom.isMultipart():
+                mp = part_geom.asMultiPolygon()
+                if mp:
+                    collected.extend(mp)
+            else:
+                poly = part_geom.asPolygon()
+                if poly:
+                    collected.append(poly)
+
+        if not collected:
+            return QgsGeometry()
+
+        return QgsGeometry.fromMultiPolygonXY(collected)
+
+
+    def _extract_polygon_rings(self, geom: QgsGeometry):
+        """
+        Helper for TRACT-style geometry checks that need to analyze individual rings.
+        Returns polygon rings in normalized form:
+        [
+            [ring1, ring2, ...],   # polygon 1
+            [ring1, ring2, ...],   # polygon 2
+        ]
+        """
+        if geom.isEmpty():
+            return []
+
+        if geom.isMultipart():
+            mp = geom.asMultiPolygon()
+            return mp if mp else []
+        else:
+            poly = geom.asPolygon()
+            return [poly] if poly else []
+
+
+    def _has_duplicate_vertices_in_rings(self, geom: QgsGeometry) -> bool:
+        """
+        TRACT-style check:
+        duplicate vertices anywhere in a ring, excluding the closing vertex.
+        """
+        polygon_rings = self._extract_polygon_rings(geom)
+
+        for poly in polygon_rings:
+            for ring in poly:
+                if len(ring) < 2:
+                    continue
+
+                body = ring[:-1]  # exclude closing point
+                coords = [(pt.x(), pt.y()) for pt in body]
+
+                if len(set(coords)) < len(coords):
+                    return True
+
+        return False
+
+
+    def _has_rings_with_fewer_than_three_unique_coords(self, geom: QgsGeometry) -> bool:
+        """
+        TRACT-style check:
+        each ring must have at least 3 unique coordinates, excluding closing vertex.
+        """
+        polygon_rings = self._extract_polygon_rings(geom)
+
+        for poly in polygon_rings:
+            for ring in poly:
+                if len(ring) < 2:
+                    return True
+
+                body = ring[:-1]
+                uniq = {(pt.x(), pt.y()) for pt in body}
+
+                if len(uniq) < 3:
+                    return True
+
+        return False
+
+
+    def _has_boundary_self_intersections(self, geom: QgsGeometry) -> bool:
+        """
+        Exact TRACT-aligned check using Shapely:
+        not sg.boundary.is_simple
+        """
+        if geom is None or geom.isEmpty():
+            return False
+
+        try:
+
+            geojson_dict = json.loads(geom.asJson())
+            sg = shape(geojson_dict)
+
+            return not sg.boundary.is_simple
+
+        except Exception as e:
+            self._log(f"Shapely boundary self-intersection check failed: {e}")
+            return False
+
+    def _get_tract_geometry_errors(self, geom: QgsGeometry) -> list[str]:
+        """
+        Final TRACT-aligned geometry checks. (updated March 2025)
+        """
+        errors = []
+
+        if geom is None or geom.isEmpty():
+            errors.append("Empty geometry")
+            return errors
+
+        if QgsWkbTypes.geometryType(geom.wkbType()) != QgsWkbTypes.PolygonGeometry:
+            errors.append("Geometry is not polygonal")
+            return errors
+
+        if self._has_duplicate_vertices_in_rings(geom):
+            errors.append("Duplicated vertices in polygon ring(s)")
+
+        if self._has_rings_with_fewer_than_three_unique_coords(geom):
+            errors.append("One or more rings have fewer than three unique coordinates.")
+
+        if self._has_boundary_self_intersections(geom):
+            errors.append("Boundary has self-intersections")
+
+        return errors
 
     # no need for drop_z_values function anymore, as we save with 2D type directly
     # def _drop_z_values(self, geom: QgsGeometry) -> QgsGeometry:
@@ -752,16 +921,22 @@ class TractGeolocationFormatter:
 
                 total_count += 1
                 geom = QgsGeometry(f.geometry())
+
                 if geom.isEmpty():
                     invalid_features.append((f.id(), "Empty geometry"))
                     continue
 
-                if not geom.isGeosValid():
-                    fixed = geom.makeValid()
-                    if fixed.isEmpty() or not fixed.isGeosValid():
-                        invalid_features.append((f.id(), "Invalid geometry (cannot make valid)"))
-                        continue
-                    geom = fixed
+                if geom.isNull():
+                    invalid_features.append((f.id(), "Null geometry"))
+                    continue
+
+                # Moved checking validity to after rounding, because some invalidities are caused by excessive precision and can be fixed by rounding
+                # if not geom.isGeosValid():
+                #     fixed = geom.makeValid()
+                #     if fixed.isEmpty() or not fixed.isGeosValid():
+                #         invalid_features.append((f.id(), "Invalid geometry (cannot make valid)"))
+                #         continue
+                #     geom = fixed
 
                 # --- Z-value removal ---
                 if self._has_z_values(geom):
@@ -795,8 +970,8 @@ class TractGeolocationFormatter:
                         invalid_features.append((f.id(), "Reprojection error: {}".format(e)))
                         continue
 
-                # Round coordinates once, after reprojection, before checks
-                rounded_geom = self._round_geometry_coordinates(geom, COORD_DECIMALS)
+                # Truncate coordinates once, after reprojection, before checks
+                rounded_geom = self._truncate_geometry_coordinates(geom, COORD_DECIMALS)
 
                 if rounded_geom.isEmpty():
                     invalid_features.append((f.id(), "Geometry became empty after coordinate rounding"))
@@ -866,6 +1041,73 @@ class TractGeolocationFormatter:
                     if geom.isEmpty() or not geom.isGeosValid():
                         invalid_features.append((f.id(), "Duplicate-vertex fix failed (invalid geometry)"))
                         continue
+
+                # 5. NOW check validity, because truncation may have created self-intersections
+                if not geom.isGeosValid():
+                    if f.id() not in repair_log:
+                        repair_log[f.id()] = []
+
+                    repair_log[f.id()].append("Geometry became invalid after truncation; applied makeValid()")
+
+                    node_id, plot_id = self._get_ids(
+                        f,
+                        layer,
+                        node_use_existing,
+                        node_field_name,
+                        plot_existing,
+                        plot_field_name,
+                    )
+
+                    validation_rows.append({
+                        "feature_id": f.id(),
+                        "NodeID": node_id,
+                        "PlotID": plot_id,
+                        "status": "WARNING",
+                        "issue_type": "invalid_geometry",
+                        "message": "Applied makeValid()"
+                    })
+
+                    fixed = geom.makeValid()
+                    fixed = self._extract_polygonal_geometry(fixed)
+
+                    if fixed.isEmpty():
+                        invalid_features.append((f.id(), "Geometry invalid after geometry processing and no polygonal geometry could be recovered"))
+                        continue
+
+                    if not fixed.isGeosValid():
+                        invalid_features.append((f.id(), "Geometry invalid after geometry processing and could not be repaired"))
+                        continue
+
+                    geom = fixed
+
+
+                # Final TRACT-style geometry checks after truncation / duplicate cleanup / makeValid
+                tract_errors = self._get_tract_geometry_errors(geom)
+
+                if tract_errors:
+                    invalid_features.append((f.id(), "TRACT-specific geometry validation failed: " + "; ".join(tract_errors)))
+
+                    node_id, plot_id = self._get_ids(
+                        f,
+                        layer,
+                        node_use_existing,
+                        node_field_name,
+                        plot_existing,
+                        plot_field_name,
+                    )
+
+                    for err in tract_errors:
+                        validation_rows.append({
+                            "feature_id": f.id(),
+                            "NodeID": node_id,
+                            "PlotID": plot_id,
+                            "status": "ERROR",
+                            "issue_type": "tract_geometry_validation",
+                            "message": err
+                        })
+
+                    continue
+
 
                 # Minimum area check
                 try:
@@ -974,6 +1216,20 @@ class TractGeolocationFormatter:
 
         del writer  # flush
 
+        # Load output layer into QGIS
+        layer_name = os.path.basename(output_path)
+        output_layer = QgsVectorLayer(output_path, layer_name, "ogr")
+
+        if output_layer.isValid():
+            QgsProject.instance().addMapLayer(output_layer)
+        else:
+            self.iface.messageBar().pushMessage(
+                "TRACT Geolocation Formatter",
+                "Output file created but could not be loaded into QGIS.",
+                level=Qgis.Warning,
+                duration=5
+            )
+
         self.iface.messageBar().pushMessage(
             "TRACT Geolocation Formatter",
             f"Finished processing {total_count} features.",
@@ -1022,16 +1278,31 @@ class TractGeolocationFormatter:
                 return f"Feature {fid}"
 
 
-        # Build summary
+        # BUILD SUMMARY REPORT
+        
+        # Count skipped features
+        skipped_invalid_features = (
+            len(invalid_features)
+            + len(small_area_features)
+            + len(polygon_hole_features)
+        )
+
         summary_lines = [
             self.tr("TRACT GeoJSON export finished."),
             self.tr("Output file: {}").format(output_path),
+            self.tr(""),
             self.tr("Total input features: {}").format(total_count),
             self.tr("Successfully written features: {}").format(written_count),
-            self.tr("Skipped / invalid features: {}").format(
-                len(invalid_features) + len(small_area_features) + len(polygon_hole_features)
-            ),
+            self.tr("Skipped / invalid features: {}").format(skipped_invalid_features),
         ]
+
+        if skipped_invalid_features > 0:
+            summary_lines.append("")
+            summary_lines.append(self.tr("WARNING: Some features were skipped during processing."))
+            summary_lines.append(self.tr("The output file contains fewer geolocations than the input file."))
+            summary_lines.append(self.tr("Please review the skipped features before using the output."))
+            summary_lines.append("")
+            summary_lines.append("")
 
         summary_lines.append(
             self.tr("Features with geometry repairs applied: {}").format(len(repair_log))
@@ -1056,9 +1327,11 @@ class TractGeolocationFormatter:
 
         if invalid_features:
             summary_lines.append("")
-            summary_lines.append(self.tr("Examples of skipped features:"))
+            summary_lines.append(self.tr("Skipped features and geometry validation errors:"))
             for fid, reason in invalid_features[:500]:
-                summary_lines.append("  FID {}: {}".format(fid, reason))
+                summary_lines.append(f"  - {_feature_label(fid)}: {reason}")
+
+    
 
 
         # --- Blocking validation errors (grouped) ---
@@ -1128,6 +1401,7 @@ class TractGeolocationFormatter:
                     writer.writerow(row)
 
         if report_path:
+            summary_lines.append(self.tr(""))
             summary_lines.append(self.tr("Validation report written to: {}").format(report_path))
 
         # Rebuilds summary text
