@@ -846,11 +846,26 @@ class TractGeolocationFormatter:
         # Prepare CRS transform to EPSG:4326
         target_crs = QgsCoordinateReferenceSystem("EPSG:4326")
         transform_context = QgsProject.instance().transformContext()
+        source_crs = layer.crs()
         coord_transform = None
 
-        # Transformation to calculate areas
+        if not source_crs.isValid():
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                self.tr("TRACT Geolocation Formatter"),
+                self.tr("Input layer has no valid CRS defined."),
+            )
+            return
+
+        if source_crs != target_crs:
+            coord_transform = QgsCoordinateTransform(source_crs, target_crs, transform_context)
+            self._log(self.tr("Reprojecting geometries to EPSG:4326..."))
+        else:
+            self._log(self.tr("Layer already in EPSG:4326."))
+
+        # Transformation to calculate areas: after geometry is already in EPSG:4326, we can transform to an equal-area CRS to calculate areas for minimum area checks
         area_transform = QgsCoordinateTransform(
-            layer.crs(),
+            target_crs,
             AREA_CRS,
             transform_context
         )
