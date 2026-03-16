@@ -1,29 +1,34 @@
-# This file contains metadata for your plugin.
-
 [general]
 name=TRACT Geolocation Formatter
 qgisMinimumVersion=3.0
-description=This plugin transforms user geolocation data into TRACT's geolocation template format
-version=0.1
-author=GeolocWidget
+description=Validate, clean, and convert geolocation layers into the TRACT GeoJSON template for sustainability and traceability workflows.
+version=0.1.0
+author=Luis Carrasco
 email=luiscartor@gmail.com
 
-about=Provide a brief description of the plugin and its purpose.
+about=The TRACT Geolocation Formatter is a QGIS plugin designed to help GIS practitioners prepare geolocation datasets for ingestion into the TRACT platform. The plugin validates and cleans polygon geometries, standardizes coordinate precision, and converts layers into the TRACT GeoJSON template format. It detects common geometry issues such as self-intersections, duplicate vertices, invalid polygons, and schema inconsistencies, while providing a validation report to help users identify and correct problematic features before upload.
 
-tracker=http://bugs
-repository=http://repo
+
+repository=https://github.com/tract-eco/tract-geolocation-formatter
+tracker=https://github.com/tract-eco/tract-geolocation-formatter/issues
 
 
 hasProcessingProvider=no
-# Uncomment the following line and add your changelog:
-# changelog=
 
-# Tags are comma separated with spaces allowed
-tags=python
+changelog=
+    0.1.0 Initial release
+    - Validate polygon geometries
+    - Remove duplicate vertices
+    - Standardize coordinates
+    - Export TRACT GeoJSON template
+    - Generate validation report
 
-homepage=http://homepage
-category=Plugins
+# Tags
+tags=GIS, GeoJSON, geometry validation, geolocation, QGIS, data cleaning, sustainability, traceability
+
+category=Vector
 icon=icon.png
+
 # experimental flag
 experimental=True
 
