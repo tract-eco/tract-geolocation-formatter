@@ -1114,8 +1114,8 @@ class TractGeolocationFormatter:
 
                     geom = self._fix_duplicate_vertices(geom)
 
-                    if geom.isEmpty() or not geom.isGeosValid():
-                        invalid_features.append((f.id(), "Duplicate-vertex fix failed (invalid geometry)"))
+                    if geom.isEmpty():
+                        invalid_features.append((f.id(), "Empty or invalid geometry after rounding and fixing duplicate vertices"))
                         skipped_count += 1
                         continue
 
@@ -1429,9 +1429,9 @@ class TractGeolocationFormatter:
                             plot_id = str(val)
 
             if plot_id:
-                return f"Feature {fid} (PlotID = {plot_id})"
+                return f"Feature {fid +1} (PlotID = {plot_id})" # Adding 1 to fid for user-friendly 1-based indexing
             else:
-                return f"Feature {fid}"
+                return f"Feature {fid +1}"
 
 
         # BUILD SUMMARY REPORT
@@ -1463,28 +1463,13 @@ class TractGeolocationFormatter:
             summary_lines.append("")
             summary_lines.append(self.tr("WARNING: Some written features still require manual fixing before upload to TRACT."))
             summary_lines.append(self.tr("These features are included in the output file with TRACTStatus = NEEDS_FIX."))
+            summary_lines.append("")
 
 
         summary_lines.append(
             self.tr("Features with geometry repairs applied: {}").format(len(repair_log))
         )
 
-        if repair_log:
-            summary_lines.append("")
-            summary_lines.append(self.tr("Geometry repair details:"))
-
-            max_display = 500
-            display_ids = list(repair_log.keys())[:max_display]
-
-            for fid in display_ids:
-                messages = repair_log[fid]
-                for msg in messages:
-                    summary_lines.append(f"  - {_feature_label(fid)}: {msg}")
-
-            if len(repair_log) > max_display:
-                summary_lines.append(
-                    f"  ... and {len(repair_log) - max_display} more features with repairs."
-                )
 
         if invalid_features:
             summary_lines.append("")
@@ -1548,6 +1533,24 @@ class TractGeolocationFormatter:
                         f"  ... and {len(tract_manual_fix_features) - 500} more polygons."
                     )
 
+
+
+        if repair_log:
+            summary_lines.append("")
+            summary_lines.append(self.tr("Geometry repair details:"))
+
+            max_display = 100
+            display_ids = list(repair_log.keys())[:max_display]
+
+            for fid in display_ids:
+                messages = repair_log[fid]
+                for msg in messages:
+                    summary_lines.append(f"  - {_feature_label(fid)}: {msg}")
+
+            if len(repair_log) > max_display:
+                summary_lines.append(
+                    f"  ... and {len(repair_log) - max_display} more features with repairs."
+                )
 
 
         summary_text = "\n".join(summary_lines)
