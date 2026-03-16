@@ -1465,11 +1465,6 @@ class TractGeolocationFormatter:
             summary_lines.append("")
 
 
-        summary_lines.append(
-            self.tr("Features with geometry repairs applied: {}").format(len(repair_log))
-        )
-
-
         if invalid_features:
             summary_lines.append("")
             summary_lines.append(self.tr("Skipped features:"))
@@ -1535,6 +1530,11 @@ class TractGeolocationFormatter:
 
 
         if repair_log:
+
+            summary_lines.append(
+            self.tr("Features with geometry repairs applied: {}").format(len(repair_log))
+            )
+
             summary_lines.append("")
             summary_lines.append(self.tr("Geometry repair details:"))
 
