@@ -67,6 +67,39 @@
        </layout>
       </item>
 
+    <!-- Fix NodeID to all polygons -->
+      <item>
+       <widget class="QRadioButton" name="nodeSameRadio">
+        <property name="text">
+         <string>Assign same NodeID to all polygons</string>
+        </property>
+       </widget>
+      </item>
+
+      <item>
+       <layout class="QHBoxLayout" name="nodeSameLayout">
+        <item>
+         <widget class="QLabel" name="nodeSameLabel">
+          <property name="text">
+           <string>NodeID value:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLineEdit" name="nodeSameLineEdit">
+          <property name="placeholderText">
+           <string>e.g. NODE_001</string>
+          </property>
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+
+
+        <!-- Sequential NodeID -->
       <item>
        <widget class="QRadioButton" name="nodeAutoRadio">
         <property name="text">
@@ -75,7 +108,6 @@
        </widget>
       </item>
 
-      <!-- CORRECTLY INSERTED PREFIX FIELD -->
       <item>
        <layout class="QHBoxLayout" name="nodePrefixLayout">
         <item>

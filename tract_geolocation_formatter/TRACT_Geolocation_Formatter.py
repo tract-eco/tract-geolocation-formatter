@@ -880,6 +880,8 @@ class TractGeolocationFormatter:
         out_fields = QgsFields()
         out_fields.append(QgsField("NodeID", QVariant.String))
         out_fields.append(QgsField("PlotID", QVariant.String))
+        out_fields.append(QgsField("TRACTStatus", QVariant.String))
+        out_fields.append(QgsField("TRACTIssue", QVariant.String))
 
         geom_type = layer.wkbType()
         geom_type_2d = QgsWkbTypes.dropZ(geom_type)
@@ -906,9 +908,12 @@ class TractGeolocationFormatter:
         invalid_features = []
         written_count = 0
         total_count = 0
+        needs_fix_count = 0
+        skipped_count = 0
 
         small_area_features = []  # list of (fid, area_ha)
         polygon_hole_features = []  # list of fids
+        tract_manual_fix_features = []  # list of (fid, [errors])
 
 
         features = list(layer.getFeatures())
@@ -918,8 +923,7 @@ class TractGeolocationFormatter:
 
         # Create progress bar in QGIS message bar
         progress_message = self.iface.messageBar().createMessage(
-            "TRACT Geolocation Formatter",
-            "Processing features..."
+            "TRACT Geolocation Formatter:  Processing features..."
         )
         progress = QProgressBar()
         progress.setMaximum(total_features)
@@ -935,14 +939,19 @@ class TractGeolocationFormatter:
                 QApplication.processEvents()
 
                 total_count += 1
+                feature_status = "READY"
+                feature_issues = []
                 geom = QgsGeometry(f.geometry())
 
                 if geom.isEmpty():
                     invalid_features.append((f.id(), "Empty geometry"))
+                    needs_fix_count = 0
+                    skipped_count += 1
                     continue
 
                 if geom.isNull():
                     invalid_features.append((f.id(), "Null geometry"))
+                    skipped_count += 1
                     continue
 
                 # Moved checking validity to after rounding, because some invalidities are caused by excessive precision and can be fixed by rounding
@@ -983,6 +992,7 @@ class TractGeolocationFormatter:
                         geom.transform(coord_transform)
                     except Exception as e:
                         invalid_features.append((f.id(), "Reprojection error: {}".format(e)))
+                        skipped_count += 1
                         continue
 
                 # Truncate coordinates once, after reprojection, before checks
@@ -990,6 +1000,7 @@ class TractGeolocationFormatter:
 
                 if rounded_geom.isEmpty():
                     invalid_features.append((f.id(), "Geometry became empty after coordinate rounding"))
+                    skipped_count += 1
                     continue
 
                 if not rounded_geom.equals(geom):
@@ -1055,6 +1066,7 @@ class TractGeolocationFormatter:
 
                     if geom.isEmpty() or not geom.isGeosValid():
                         invalid_features.append((f.id(), "Duplicate-vertex fix failed (invalid geometry)"))
+                        skipped_count += 1
                         continue
 
                 # 5. NOW check validity, because truncation may have created self-intersections
@@ -1082,17 +1094,72 @@ class TractGeolocationFormatter:
                         "message": "Applied makeValid()"
                     })
 
-                    fixed = geom.makeValid()
-                    fixed = self._extract_polygonal_geometry(fixed)
+                    original_invalid_geom = QgsGeometry(geom)
 
-                    if fixed.isEmpty():
-                        invalid_features.append((f.id(), "Geometry invalid after geometry processing and no polygonal geometry could be recovered"))
-                        continue
 
-                    if not fixed.isGeosValid():
-                        invalid_features.append((f.id(), "Geometry invalid after geometry processing and could not be repaired"))
-                        continue
+                fixed = geom.makeValid()
+                fixed = self._extract_polygonal_geometry(fixed)
 
+                if fixed.isEmpty():
+                    # Could not recover a valid polygonal geometry, so keep original geometry
+                    # and mark feature for manual fixing
+                    feature_status = "NEEDS_FIX"
+                    feature_issues.append("Automatic geometry repair failed; manual fix required")
+
+                    node_id, plot_id = self._get_ids(
+                        f,
+                        layer,
+                        node_use_existing,
+                        node_field_name,
+                        plot_existing,
+                        plot_field_name,
+                    )
+
+                    validation_rows.append({
+                        "feature_id": f.id(),
+                        "NodeID": node_id,
+                        "PlotID": plot_id,
+                        "status": "ERROR",
+                        "issue_type": "invalid_geometry_unrepaired",
+                        "message": "Automatic geometry repair failed; manual fix required"
+                    })
+
+                    if f.id() not in repair_log:
+                        repair_log[f.id()] = []
+                    repair_log[f.id()].append("Automatic repair failed; original geometry kept and marked as NEEDS_FIX")
+
+                    geom = original_invalid_geom
+
+                elif not fixed.isGeosValid():
+                    # Repair attempt returned polygonal geometry, but it is still invalid
+                    feature_status = "NEEDS_FIX"
+                    feature_issues.append("Geometry remains invalid after automatic repair; manual fix required")
+
+                    node_id, plot_id = self._get_ids(
+                        f,
+                        layer,
+                        node_use_existing,
+                        node_field_name,
+                        plot_existing,
+                        plot_field_name,
+                    )
+
+                    validation_rows.append({
+                        "feature_id": f.id(),
+                        "NodeID": node_id,
+                        "PlotID": plot_id,
+                        "status": "ERROR",
+                        "issue_type": "invalid_geometry_unrepaired",
+                        "message": "Geometry remains invalid after automatic repair; manual fix required"
+                    })
+
+                    if f.id() not in repair_log:
+                        repair_log[f.id()] = []
+                    repair_log[f.id()].append("Automatic repair did not fully fix geometry; original geometry retained and marked as NEEDS_FIX")
+
+                    geom = original_invalid_geom
+
+                else:
                     geom = fixed
 
 
@@ -1100,7 +1167,9 @@ class TractGeolocationFormatter:
                 tract_errors = self._get_tract_geometry_errors(geom)
 
                 if tract_errors:
-                    invalid_features.append((f.id(), "TRACT-specific geometry validation failed: " + "; ".join(tract_errors)))
+                    feature_status = "NEEDS_FIX"
+                    feature_issues.extend(tract_errors)
+                    tract_manual_fix_features.append((f.id(), tract_errors))
 
                     node_id, plot_id = self._get_ids(
                         f,
@@ -1121,8 +1190,6 @@ class TractGeolocationFormatter:
                             "message": err
                         })
 
-                    continue
-
 
                 # Minimum area check
                 try:
@@ -1132,10 +1199,13 @@ class TractGeolocationFormatter:
                     area_ha = area_m2 / 10000.0
                 except Exception as e:
                     invalid_features.append((f.id(), f"Area computation failed: {e}"))
+                    skipped_count += 1
                     continue
 
                 if area_ha < MIN_PLOT_AREA_HA:
                     small_area_features.append((f.id(), area_ha))
+                    feature_status = "NEEDS_FIX"
+                    feature_issues.append(f"Area below minimum ({area_ha:.4f} ha < {MIN_PLOT_AREA_HA} ha)")
 
                     node_id, plot_id = self._get_ids(
                         f,
@@ -1155,8 +1225,6 @@ class TractGeolocationFormatter:
                         "message": f"Area below minimum ({area_ha:.4f} ha < {MIN_PLOT_AREA_HA} ha)"
                     })
 
-                    continue
-
                 # Polygon holes detection (report only)
                 has_holes = False
 
@@ -1173,6 +1241,8 @@ class TractGeolocationFormatter:
 
                 if has_holes:
                     polygon_hole_features.append(f.id())
+                    feature_status = "NEEDS_FIX"
+                    feature_issues.append("Polygon contains interior holes")
 
                     node_id, plot_id = self._get_ids(
                         f,
@@ -1192,7 +1262,10 @@ class TractGeolocationFormatter:
                         "message": "Polygon contains interior holes"
                     })
 
-                    continue
+
+
+                if feature_status == "NEEDS_FIX":
+                    needs_fix_count += 1
 
                 new_feat = QgsFeature(out_fields)
 
@@ -1218,10 +1291,14 @@ class TractGeolocationFormatter:
                 else:
                     new_feat["PlotID"] = ""
 
+                new_feat["TRACTStatus"] = feature_status
+                new_feat["TRACTIssue"] = "; ".join(feature_issues) if feature_issues else ""
+
                 new_feat.setGeometry(geom)
 
                 if not writer.addFeature(new_feat):
                     invalid_features.append((f.id(), "Failed to write feature to output"))
+                    skipped_count += 1
                     continue
 
                 written_count += 1
@@ -1295,12 +1372,12 @@ class TractGeolocationFormatter:
 
         # BUILD SUMMARY REPORT
         
-        # Count skipped features
-        skipped_invalid_features = (
-            len(invalid_features)
-            + len(small_area_features)
-            + len(polygon_hole_features)
-        )
+        # # Count skipped features
+        # skipped_invalid_features = (
+        #     len(invalid_features)
+        #     + len(small_area_features)
+        #     + len(polygon_hole_features)
+        # )
 
         summary_lines = [
             self.tr("TRACT GeoJSON export finished."),
@@ -1308,16 +1385,21 @@ class TractGeolocationFormatter:
             self.tr(""),
             self.tr("Total input features: {}").format(total_count),
             self.tr("Successfully written features: {}").format(written_count),
-            self.tr("Skipped / invalid features: {}").format(skipped_invalid_features),
+            self.tr("Written features needing manual fix: {}").format(needs_fix_count),
+            self.tr("Skipped features: {}").format(skipped_count),
         ]
 
-        if skipped_invalid_features > 0:
+        if skipped_count > 0:
             summary_lines.append("")
-            summary_lines.append(self.tr("WARNING: Some features were skipped during processing."))
+            summary_lines.append(self.tr("WARNING: Some features could not be written to the output file."))
             summary_lines.append(self.tr("The output file contains fewer geolocations than the input file."))
             summary_lines.append(self.tr("Please review the skipped features before using the output."))
+
+        if needs_fix_count > 0:
             summary_lines.append("")
-            summary_lines.append("")
+            summary_lines.append(self.tr("WARNING: Some written features still require manual fixing before upload to TRACT."))
+            summary_lines.append(self.tr("These features are included in the output file with TRACTStatus = NEEDS_FIX."))
+
 
         summary_lines.append(
             self.tr("Features with geometry repairs applied: {}").format(len(repair_log))
@@ -1342,7 +1424,7 @@ class TractGeolocationFormatter:
 
         if invalid_features:
             summary_lines.append("")
-            summary_lines.append(self.tr("Skipped features and geometry validation errors:"))
+            summary_lines.append(self.tr("Skipped features:"))
             for fid, reason in invalid_features[:500]:
                 summary_lines.append(f"  - {_feature_label(fid)}: {reason}")
 
@@ -1350,9 +1432,10 @@ class TractGeolocationFormatter:
 
 
         # --- Blocking validation errors (grouped) ---
-        if small_area_features or polygon_hole_features:
+        # --- Written features requiring manual fix (grouped) ---
+        if small_area_features or polygon_hole_features or tract_manual_fix_features:
             summary_lines.append("")
-            summary_lines.append(self.tr("Blocking validation errors:"))
+            summary_lines.append(self.tr("Written features requiring manual fix:"))
 
             if small_area_features:
                 summary_lines.append(
@@ -1384,9 +1467,22 @@ class TractGeolocationFormatter:
                         f"  ... and {len(polygon_hole_features) - 500} more polygons."
                     )
 
+
+            if tract_manual_fix_features:
+                summary_lines.append("")
                 summary_lines.append(
-                    self.tr("These polygons were not modified by the plugin.")
+                    self.tr("TRACT-specific geometry validation issues:")
                 )
+
+                for fid, errors in tract_manual_fix_features[:500]:
+                    summary_lines.append(
+                        f"  - {_feature_label(fid)}: {'; '.join(errors)}"
+                    )
+
+                if len(tract_manual_fix_features) > 500:
+                    summary_lines.append(
+                        f"  ... and {len(tract_manual_fix_features) - 500} more polygons."
+                    )
 
 
 
