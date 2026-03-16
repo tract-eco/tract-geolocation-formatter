@@ -46,6 +46,8 @@ The plugin works directly on existing QGIS layers and does **not** require advan
 - Export ready-to-upload GeoJSON files for the TRACT platform
 - Works with common GIS formats (GeoJSON, Shapefile, GeoPackage)
 
+The plugin attempts to automatically fix some geometry issues where possible. However, certain issues may require manual correction by the user in QGIS before the dataset can be fully validated.
+
 Designed to be:
 - Lightweight
 - Reproducible
@@ -55,9 +57,20 @@ Designed to be:
 
 The plugin produces two outputs:
 
-1. Clean GeoJSON file
+1. GeoJSON file structured according to the TRACT geolocation template
 
-A TRACT-compatible GeoJSON file containing validated and standardized geometries ready for upload to the TRACT platform.
+This file contains:
+
+- Standardized attributes (NodeID, PlotID)
+- Rounded coordinate precision
+- Reprojected geometries (EPSG:4326)
+- Geometry fixes applied where possible
+
+Depending on the detected issues, the output may contain:
+- A fully valid dataset ready for upload, or
+- A dataset where some features still require manual correction.
+
+Features that could not be automatically repaired may be skipped or flagged during validation.
 
 2. Validation report
 

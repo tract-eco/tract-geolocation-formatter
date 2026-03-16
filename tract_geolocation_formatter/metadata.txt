@@ -11,7 +11,7 @@ about=The TRACT Geolocation Formatter is a QGIS plugin designed to help GIS prac
 
 repository=https://github.com/tract-eco/tract-geolocation-formatter
 tracker=https://github.com/tract-eco/tract-geolocation-formatter/issues
-
+homepage=https://github.com/tract-eco/tract-geolocation-formatter
 
 hasProcessingProvider=no
 
