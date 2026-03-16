@@ -927,15 +927,18 @@ class TractGeolocationFormatter:
         geom_type = layer.wkbType()
         geom_type_2d = QgsWkbTypes.dropZ(geom_type)
 
-        writer = QgsVectorFileWriter(
-            output_path,
-            "UTF-8",
-            out_fields,
-            geom_type_2d, # needed to ensure a 2d type
-            target_crs,
-            "GeoJSON",
-        )
+        save_options = QgsVectorFileWriter.SaveVectorOptions()
+        save_options.driverName = "GeoJSON"
+        save_options.fileEncoding = "UTF-8"
 
+        writer = QgsVectorFileWriter.create(
+            output_path,
+            out_fields,
+            geom_type_2d,
+            target_crs,
+            QgsProject.instance().transformContext(),
+            save_options
+        )
 
         if writer.hasError() != QgsVectorFileWriter.NoError:
             QMessageBox.critical(
