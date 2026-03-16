@@ -213,6 +213,10 @@ class TractGeolocationFormatter:
             self.dlg = TractGeolocationFormatterDialog()
             # Connect browse button once
             self.dlg.outputBrowseButton.clicked.connect(self._browse_output_path)
+            # Connect NodeID radio buttons
+            self.dlg.nodeExistingRadio.toggled.connect(self._update_nodeid_ui_state)
+            self.dlg.nodeSameRadio.toggled.connect(self._update_nodeid_ui_state)
+            self.dlg.nodeAutoRadio.toggled.connect(self._update_nodeid_ui_state)
 
         # Populate dialog every time (layers, fields, defaults)
         self._populate_dialog()
@@ -258,7 +262,10 @@ class TractGeolocationFormatter:
 
         # Set default NodeID / PlotID options
         self.dlg.nodeExistingRadio.setChecked(True)
+        self.dlg.nodeSameRadio.setChecked(False)
         self.dlg.nodeAutoRadio.setChecked(False)
+
+        self.dlg.nodeSameLineEdit.setText("")
 
         self.dlg.plotNoneRadio.setChecked(True)
         self.dlg.plotExistingRadio.setChecked(False)
@@ -279,6 +286,15 @@ class TractGeolocationFormatter:
             pass
 
         self.dlg.layerComboBox.currentIndexChanged.connect(self._on_layer_changed)
+
+        # Enable/disable stat is refreshed when dialog opens
+        self._update_nodeid_ui_state()
+
+    def _update_nodeid_ui_state(self):
+        """Enable only the relevant NodeID input widget."""
+        self.dlg.nodeFieldCombo.setEnabled(self.dlg.nodeExistingRadio.isChecked())
+        self.dlg.nodeSameLineEdit.setEnabled(self.dlg.nodeSameRadio.isChecked())
+        self.dlg.nodePrefixLineEdit.setEnabled(self.dlg.nodeAutoRadio.isChecked())
 
     def _populate_field_combos(self):
         """Populate NodeID and PlotID field comboboxes from selected layer."""
@@ -475,8 +491,17 @@ class TractGeolocationFormatter:
         return QgsWkbTypes.hasZ(geom.wkbType())
     
     # Helper to get NodeID and PlotID for a feature
-    def _get_ids(self, feature, layer, node_use_existing, node_field_name,
-                plot_existing, plot_field_name):
+    def _get_ids(
+        self,
+        feature,
+        layer,
+        node_use_existing,
+        node_field_name,
+        node_same,
+        node_same_value,
+        plot_existing,
+        plot_field_name
+    ):
         node_val = ""
         plot_val = ""
 
@@ -485,6 +510,8 @@ class TractGeolocationFormatter:
             if idx != -1:
                 v = feature.attributes()[idx]
                 node_val = "" if v is None else str(v)
+        elif node_same:
+            node_val = node_same_value
 
         if plot_existing and plot_field_name:
             idx = layer.fields().indexFromName(plot_field_name)
@@ -761,7 +788,13 @@ class TractGeolocationFormatter:
 
         # NodeID options
         node_use_existing = self.dlg.nodeExistingRadio.isChecked()
+        node_same = self.dlg.nodeSameRadio.isChecked()
         node_auto = self.dlg.nodeAutoRadio.isChecked()
+
+        # Fixed NodeID value for all polygons
+        node_same_value = ""
+        if node_same:
+            node_same_value = self.dlg.nodeSameLineEdit.text().strip()
 
         # Optional prefix for auto-generated NodeIDs
         node_prefix = ""
@@ -769,11 +802,11 @@ class TractGeolocationFormatter:
             node_prefix = self.dlg.nodePrefixLineEdit.text() or ""
 
         # Must choose one method
-        if not node_use_existing and not node_auto:
+        if not node_use_existing and not node_same and not node_auto:
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 self.tr("TRACT Geolocation Formatter"),
-                self.tr("Please choose how to create NodeID (existing field or auto-generate)."),
+                self.tr("Please choose how to create NodeID (existing field, same NodeID for all polygons, or auto-generate)."),
             )
             return
 
@@ -788,6 +821,14 @@ class TractGeolocationFormatter:
                     self.tr("Please select a NodeID field."),
                 )
                 return
+
+        if node_same and not node_same_value:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                self.tr("TRACT Geolocation Formatter"),
+                self.tr("Please enter the NodeID value to assign to all polygons."),
+            )
+            return
 
         # PlotID options
         plot_none = self.dlg.plotNoneRadio.isChecked()
@@ -973,6 +1014,8 @@ class TractGeolocationFormatter:
                         layer,
                         node_use_existing,
                         node_field_name,
+                        node_same,
+                        node_same_value,
                         plot_existing,
                         plot_field_name,
                     )
@@ -1013,6 +1056,8 @@ class TractGeolocationFormatter:
                         layer,
                         node_use_existing,
                         node_field_name,
+                        node_same,
+                        node_same_value,
                         plot_existing,
                         plot_field_name,
                     )
@@ -1049,6 +1094,8 @@ class TractGeolocationFormatter:
                         layer,
                         node_use_existing,
                         node_field_name,
+                        node_same,
+                        node_same_value,
                         plot_existing,
                         plot_field_name,
                     )
@@ -1081,6 +1128,8 @@ class TractGeolocationFormatter:
                         layer,
                         node_use_existing,
                         node_field_name,
+                        node_same,
+                        node_same_value,
                         plot_existing,
                         plot_field_name,
                     )
@@ -1111,6 +1160,8 @@ class TractGeolocationFormatter:
                         layer,
                         node_use_existing,
                         node_field_name,
+                        node_same,
+                        node_same_value,    
                         plot_existing,
                         plot_field_name,
                     )
@@ -1140,6 +1191,8 @@ class TractGeolocationFormatter:
                         layer,
                         node_use_existing,
                         node_field_name,
+                        node_same,
+                        node_same_value,
                         plot_existing,
                         plot_field_name,
                     )
@@ -1176,6 +1229,8 @@ class TractGeolocationFormatter:
                         layer,
                         node_use_existing,
                         node_field_name,
+                        node_same,
+                        node_same_value,
                         plot_existing,
                         plot_field_name,
                     )
@@ -1212,6 +1267,8 @@ class TractGeolocationFormatter:
                         layer,
                         node_use_existing,
                         node_field_name,
+                        node_same,
+                        node_same_value,
                         plot_existing,
                         plot_field_name,
                     )
@@ -1249,6 +1306,8 @@ class TractGeolocationFormatter:
                         layer,
                         node_use_existing,
                         node_field_name,
+                        node_same,
+                        node_same_value,
                         plot_existing,
                         plot_field_name,
                     )
@@ -1275,6 +1334,8 @@ class TractGeolocationFormatter:
                     node_idx = layer.fields().indexFromName(node_field_name)
                     val = attrs[node_idx] if node_idx != -1 else None
                     new_feat["NodeID"] = "" if val is None else str(val)
+                elif node_same:
+                    new_feat["NodeID"] = node_same_value
                 else:
                     new_feat["NodeID"] = f"{node_prefix}{written_count + 1}"
 
