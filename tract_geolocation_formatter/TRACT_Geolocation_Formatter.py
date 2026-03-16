@@ -989,7 +989,6 @@ class TractGeolocationFormatter:
 
                 if geom.isEmpty():
                     invalid_features.append((f.id(), "Empty geometry"))
-                    needs_fix_count = 0
                     skipped_count += 1
                     continue
 
