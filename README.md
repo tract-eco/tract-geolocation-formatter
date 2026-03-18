@@ -158,8 +158,9 @@ Clone the repository and install development dependencies:
 git clone <REPO_URL>
 cd tract-geolocation-formatter
 poetry install
+```
 
 
 ## License
 
-This project is licensed under Apache 2.0. You are free to use, modify, and distribute this software in accordance with the license terms of Apache 2.0. Contributions to this repository are subject to a separate Contributor License Agreement
+This project is licensed under Apache 2.0. You are free to use, modify, and distribute this software in accordance with the license terms of Apache 2.0. Contributions to this repository are subject to a separate Contributor License Agreement.
