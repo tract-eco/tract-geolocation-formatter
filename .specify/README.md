@@ -59,8 +59,8 @@ For straightforward work within established patterns.
     decision-log.md       # No review needed
     plan.md               # No review needed
     tasks.md              # No review needed
-src/...                   # Review as normal
-tests/...                 # Review as normal
+tract_geolocation_formatter/...  # Review as normal
+tests/...                        # Review as normal
 ```
 
 ## Personal Flexibility

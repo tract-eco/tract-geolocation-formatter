@@ -3,7 +3,7 @@
 > **Ticket:** DEV-XXXX
 > **Date:** YYYY-MM-DD
 
-Discrete, independently testable units. Each task targets ~1 MR.
+Discrete, independently testable units. Each task targets a focused set of changes.
 
 ---
 
@@ -11,7 +11,7 @@ Discrete, independently testable units. Each task targets ~1 MR.
 
 - `[P]` — Can run in parallel with other `[P]` tasks at the same level
 - `[B]` — Blocked by the task(s) listed in "Depends on"
-- **AT-N** — References acceptance test N from the spec
+- **AC-N** — References acceptance criterion N from the spec
 
 ## Task Breakdown
 
@@ -22,8 +22,8 @@ Discrete, independently testable units. Each task targets ~1 MR.
 - **Files:**
   - Create: `path/to/new_file.py`
   - Modify: `path/to/existing_file.py`
-- **Acceptance tests covered:** AT-1
-- **Verification:** [How to confirm this task is done — test command, manual check, etc.]
+- **Acceptance criteria covered:** AC-1
+- **Verification:** [How to confirm this task is done — test command, manual check in QGIS, etc.]
 
 ---
 
@@ -34,7 +34,7 @@ Discrete, independently testable units. Each task targets ~1 MR.
 - **Files:**
   - Create:
   - Modify:
-- **Acceptance tests covered:**
+- **Acceptance criteria covered:**
 - **Verification:**
 
 ---
@@ -46,7 +46,7 @@ Discrete, independently testable units. Each task targets ~1 MR.
 - **Files:**
   - Create:
   - Modify:
-- **Acceptance tests covered:**
+- **Acceptance criteria covered:**
 - **Verification:**
 
 ---
@@ -58,7 +58,7 @@ Discrete, independently testable units. Each task targets ~1 MR.
 - **Files:**
   - Create:
   - Modify:
-- **Acceptance tests covered:**
+- **Acceptance criteria covered:**
 - **Verification:**
 
 ## Dependency Graph
@@ -70,8 +70,8 @@ Task 1
 └── Task 4 [B] (after 2 + 3)
 ```
 
-## Uncovered Acceptance Tests
+## Uncovered Acceptance Criteria
 
-List any acceptance tests from the spec not yet assigned to a task:
+List any acceptance criteria from the spec not yet assigned to a task:
 
 - None (all covered)

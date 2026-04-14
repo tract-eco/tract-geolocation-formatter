@@ -66,6 +66,9 @@ MIN_PLOT_AREA_HA = 0.05
 AREA_CRS = QgsCoordinateReferenceSystem("EPSG:6933")  # Equal-area CRS
 COORD_DECIMALS = 6
 
+# TRACT output field names — used to detect clashes with input layer fields
+TRACT_FIELD_NAMES = {"NodeID", "PlotID", "TRACTStatus", "TRACTIssue"}
+
 
 class TractGeolocationFormatter:
     """QGIS Plugin Implementation."""
@@ -521,6 +524,40 @@ class TractGeolocationFormatter:
 
         return node_val, plot_val
 
+    def _build_output_fields(self, layer_fields, excluded_fields):
+        """
+        Build the output QgsFields from the input layer fields plus TRACT fields.
+
+        - Fields in `excluded_fields` are skipped (mapped to NodeID/PlotID via "Use existing field").
+        - Fields whose name clashes with a TRACT field name get an '_orig' suffix.
+        - The four TRACT fields are always appended at the end.
+
+        Returns:
+            tuple[QgsFields, dict[str, str]]: (output fields, rename map {original_name: output_name})
+        """
+        out_fields = QgsFields()
+        rename_map = {}
+
+        for field in layer_fields:
+            name = field.name()
+
+            if name in excluded_fields:
+                continue
+
+            if name in TRACT_FIELD_NAMES:
+                new_name = f"{name}_orig"
+                rename_map[name] = new_name
+                out_fields.append(QgsField(new_name, field.type()))
+            else:
+                out_fields.append(QgsField(name, field.type()))
+
+        out_fields.append(QgsField("NodeID", QVariant.String))
+        out_fields.append(QgsField("PlotID", QVariant.String))
+        out_fields.append(QgsField("TRACTStatus", QVariant.String))
+        out_fields.append(QgsField("TRACTIssue", QVariant.String))
+
+        return out_fields, rename_map
+
     # Helper for after makeValid, to ensure we only keep polygonal parts if we end up with a GeometryCollection
     def _extract_polygonal_geometry(self, geom: QgsGeometry) -> QgsGeometry:
         """
@@ -917,12 +954,15 @@ class TractGeolocationFormatter:
         else:
             self._log(self.tr("Layer already in EPSG:4326."))
 
-        # Output fields
-        out_fields = QgsFields()
-        out_fields.append(QgsField("NodeID", QVariant.String))
-        out_fields.append(QgsField("PlotID", QVariant.String))
-        out_fields.append(QgsField("TRACTStatus", QVariant.String))
-        out_fields.append(QgsField("TRACTIssue", QVariant.String))
+        # Build excluded fields set (fields mapped to NodeID/PlotID via "Use existing field")
+        excluded_fields = set()
+        if node_use_existing and node_field_name:
+            excluded_fields.add(node_field_name)
+        if plot_existing and plot_field_name:
+            excluded_fields.add(plot_field_name)
+
+        # Output fields: original layer fields (with exclusion/rename) + TRACT fields
+        out_fields, rename_map = self._build_output_fields(layer.fields(), excluded_fields)
 
         geom_type = layer.wkbType()
         geom_type_2d = QgsWkbTypes.dropZ(geom_type)
@@ -1329,6 +1369,16 @@ class TractGeolocationFormatter:
                     needs_fix_count += 1
 
                 new_feat = QgsFeature(out_fields)
+
+                # Copy original field values
+                for field in layer.fields():
+                    name = field.name()
+                    if name in excluded_fields:
+                        continue
+                    source_idx = layer.fields().indexFromName(name)
+                    val = f.attributes()[source_idx]
+                    output_name = rename_map.get(name, name)
+                    new_feat[output_name] = val
 
                 # NodeID
                 if node_use_existing:
