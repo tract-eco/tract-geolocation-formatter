@@ -66,6 +66,9 @@ MIN_PLOT_AREA_HA = 0.05
 AREA_CRS = QgsCoordinateReferenceSystem("EPSG:6933")  # Equal-area CRS
 COORD_DECIMALS = 6
 
+# TRACT output field names — used to detect clashes with input layer fields
+TRACT_FIELD_NAMES = {"NodeID", "PlotID", "TRACTStatus", "TRACTIssue"}
+
 
 class TractGeolocationFormatter:
     """QGIS Plugin Implementation."""
@@ -217,6 +220,12 @@ class TractGeolocationFormatter:
             self.dlg.nodeExistingRadio.toggled.connect(self._update_nodeid_ui_state)
             self.dlg.nodeSameRadio.toggled.connect(self._update_nodeid_ui_state)
             self.dlg.nodeAutoRadio.toggled.connect(self._update_nodeid_ui_state)
+            self.dlg.nodeBuildRadio.toggled.connect(self._update_nodeid_ui_state)
+            # Connect PlotID radio buttons
+            self.dlg.plotNoneRadio.toggled.connect(self._update_plotid_ui_state)
+            self.dlg.plotExistingRadio.toggled.connect(self._update_plotid_ui_state)
+            self.dlg.plotAutoRadio.toggled.connect(self._update_plotid_ui_state)
+            self.dlg.plotBuildRadio.toggled.connect(self._update_plotid_ui_state)
 
         # Populate dialog every time (layers, fields, defaults)
         self._populate_dialog()
@@ -264,14 +273,22 @@ class TractGeolocationFormatter:
         self.dlg.nodeExistingRadio.setChecked(True)
         self.dlg.nodeSameRadio.setChecked(False)
         self.dlg.nodeAutoRadio.setChecked(False)
+        self.dlg.nodeBuildRadio.setChecked(False)
 
         self.dlg.nodeSameLineEdit.setText("")
+        self.dlg.nodeBuildSepLineEdit.setText("_")
+        self.dlg.nodeBuildPrefixLineEdit.setText("")
+        self.dlg.nodeBuildSuffixLineEdit.setText("")
 
         self.dlg.plotNoneRadio.setChecked(True)
         self.dlg.plotExistingRadio.setChecked(False)
         self.dlg.plotAutoRadio.setChecked(False)
+        self.dlg.plotBuildRadio.setChecked(False)
 
         self.dlg.plotPrefixLineEdit.setText("")
+        self.dlg.plotBuildSepLineEdit.setText("_")
+        self.dlg.plotBuildPrefixLineEdit.setText("")
+        self.dlg.plotBuildSuffixLineEdit.setText("")
 
         # Populate field combos based on current layer
         self._populate_field_combos()
@@ -287,20 +304,32 @@ class TractGeolocationFormatter:
 
         self.dlg.layerComboBox.currentIndexChanged.connect(self._on_layer_changed)
 
-        # Enable/disable stat is refreshed when dialog opens
+        # Enable/disable state is refreshed when dialog opens
         self._update_nodeid_ui_state()
+        self._update_plotid_ui_state()
 
     def _update_nodeid_ui_state(self):
         """Enable only the relevant NodeID input widget."""
         self.dlg.nodeFieldCombo.setEnabled(self.dlg.nodeExistingRadio.isChecked())
         self.dlg.nodeSameLineEdit.setEnabled(self.dlg.nodeSameRadio.isChecked())
         self.dlg.nodePrefixLineEdit.setEnabled(self.dlg.nodeAutoRadio.isChecked())
+        self.dlg.nodeBuildContainer.setVisible(self.dlg.nodeBuildRadio.isChecked())
+
+    def _update_plotid_ui_state(self):
+        """Enable only the relevant PlotID input widget."""
+        self.dlg.plotFieldCombo.setEnabled(self.dlg.plotExistingRadio.isChecked())
+        self.dlg.plotPrefixLineEdit.setEnabled(self.dlg.plotAutoRadio.isChecked())
+        self.dlg.plotBuildContainer.setVisible(self.dlg.plotBuildRadio.isChecked())
 
     def _populate_field_combos(self):
         """Populate NodeID and PlotID field comboboxes from selected layer."""
         idx = self.dlg.layerComboBox.currentIndex()
         self.dlg.nodeFieldCombo.clear()
         self.dlg.plotFieldCombo.clear()
+        self.dlg.nodeBuildField1Combo.clear()
+        self.dlg.nodeBuildField2Combo.clear()
+        self.dlg.plotBuildField1Combo.clear()
+        self.dlg.plotBuildField2Combo.clear()
 
         if idx < 0 or idx >= len(self._polygon_layers):
             return
@@ -310,6 +339,14 @@ class TractGeolocationFormatter:
 
         self.dlg.nodeFieldCombo.addItems(field_names)
         self.dlg.plotFieldCombo.addItems(field_names)
+
+        # Expression field combos — Field 2 gets an empty first entry (optional)
+        self.dlg.nodeBuildField1Combo.addItems(field_names)
+        self.dlg.nodeBuildField2Combo.addItem("")
+        self.dlg.nodeBuildField2Combo.addItems(field_names)
+        self.dlg.plotBuildField1Combo.addItems(field_names)
+        self.dlg.plotBuildField2Combo.addItem("")
+        self.dlg.plotBuildField2Combo.addItems(field_names)
 
     def _on_layer_changed(self):
         """Refresh field combos and apply default selections when layer changes."""
@@ -520,6 +557,71 @@ class TractGeolocationFormatter:
                 plot_val = "" if v is None else str(v)
 
         return node_val, plot_val
+
+    def _build_expression_value(self, feature, layer, prefix, field1_name, field2_name, suffix, separator):
+        """
+        Build an ID from expression parts, joining non-empty parts with the separator.
+
+        Parts: prefix, field1 value, field2 value, suffix.
+        Empty/null parts are omitted (no double separators).
+        """
+        parts = []
+
+        if prefix:
+            parts.append(prefix)
+
+        if field1_name:
+            idx = layer.fields().indexFromName(field1_name)
+            if idx != -1:
+                val = feature.attributes()[idx]
+                if val is not None and str(val) != "":
+                    parts.append(str(val))
+
+        if field2_name:
+            idx = layer.fields().indexFromName(field2_name)
+            if idx != -1:
+                val = feature.attributes()[idx]
+                if val is not None and str(val) != "":
+                    parts.append(str(val))
+
+        if suffix:
+            parts.append(suffix)
+
+        return separator.join(parts)
+
+    def _build_output_fields(self, layer_fields, excluded_fields):
+        """
+        Build the output QgsFields from the input layer fields plus TRACT fields.
+
+        - Fields in `excluded_fields` are skipped (mapped to NodeID/PlotID via "Use existing field").
+        - Fields whose name clashes with a TRACT field name get an '_orig' suffix.
+        - The four TRACT fields are always appended at the end.
+
+        Returns:
+            tuple[QgsFields, dict[str, str]]: (output fields, rename map {original_name: output_name})
+        """
+        out_fields = QgsFields()
+        rename_map = {}
+
+        for field in layer_fields:
+            name = field.name()
+
+            if name in excluded_fields:
+                continue
+
+            if name in TRACT_FIELD_NAMES:
+                new_name = f"{name}_orig"
+                rename_map[name] = new_name
+                out_fields.append(QgsField(new_name, field.type()))
+            else:
+                out_fields.append(QgsField(name, field.type()))
+
+        out_fields.append(QgsField("NodeID", QVariant.String))
+        out_fields.append(QgsField("PlotID", QVariant.String))
+        out_fields.append(QgsField("TRACTStatus", QVariant.String))
+        out_fields.append(QgsField("TRACTIssue", QVariant.String))
+
+        return out_fields, rename_map
 
     # Helper for after makeValid, to ensure we only keep polygonal parts if we end up with a GeometryCollection
     def _extract_polygonal_geometry(self, geom: QgsGeometry) -> QgsGeometry:
@@ -790,6 +892,7 @@ class TractGeolocationFormatter:
         node_use_existing = self.dlg.nodeExistingRadio.isChecked()
         node_same = self.dlg.nodeSameRadio.isChecked()
         node_auto = self.dlg.nodeAutoRadio.isChecked()
+        node_build = self.dlg.nodeBuildRadio.isChecked()
 
         # Fixed NodeID value for all polygons
         node_same_value = ""
@@ -801,8 +904,27 @@ class TractGeolocationFormatter:
         if node_auto:
             node_prefix = self.dlg.nodePrefixLineEdit.text() or ""
 
+        # Build from expression params
+        node_build_params = {}
+        if node_build:
+            node_build_field1 = self.dlg.nodeBuildField1Combo.currentText()
+            if not node_build_field1:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    self.tr("TRACT Geolocation Formatter"),
+                    self.tr("Please select at least Field 1 for the NodeID expression."),
+                )
+                return
+            node_build_params = {
+                "prefix": self.dlg.nodeBuildPrefixLineEdit.text().strip(),
+                "field1": node_build_field1,
+                "field2": self.dlg.nodeBuildField2Combo.currentText() or "",
+                "suffix": self.dlg.nodeBuildSuffixLineEdit.text().strip(),
+                "separator": self.dlg.nodeBuildSepLineEdit.text() or "_",
+            }
+
         # Must choose one method
-        if not node_use_existing and not node_same and not node_auto:
+        if not node_use_existing and not node_same and not node_auto and not node_build:
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 self.tr("TRACT Geolocation Formatter"),
@@ -834,6 +956,7 @@ class TractGeolocationFormatter:
         plot_none = self.dlg.plotNoneRadio.isChecked()
         plot_existing = self.dlg.plotExistingRadio.isChecked()
         plot_auto = self.dlg.plotAutoRadio.isChecked()
+        plot_build = self.dlg.plotBuildRadio.isChecked()
 
         plot_field_name = None
         plot_prefix = ""
@@ -849,6 +972,25 @@ class TractGeolocationFormatter:
                 return
         elif plot_auto:
             plot_prefix = self.dlg.plotPrefixLineEdit.text() or ""
+
+        # Build from expression params - PlotID
+        plot_build_params = {}
+        if plot_build:
+            plot_build_field1 = self.dlg.plotBuildField1Combo.currentText()
+            if not plot_build_field1:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    self.tr("TRACT Geolocation Formatter"),
+                    self.tr("Please select at least Field 1 for the PlotID expression."),
+                )
+                return
+            plot_build_params = {
+                "prefix": self.dlg.plotBuildPrefixLineEdit.text().strip(),
+                "field1": plot_build_field1,
+                "field2": self.dlg.plotBuildField2Combo.currentText() or "",
+                "suffix": self.dlg.plotBuildSuffixLineEdit.text().strip(),
+                "separator": self.dlg.plotBuildSepLineEdit.text() or "_",
+            }
 
         # Output path
         output_path = self.dlg.outputPathLineEdit.text().strip()
@@ -917,12 +1059,15 @@ class TractGeolocationFormatter:
         else:
             self._log(self.tr("Layer already in EPSG:4326."))
 
-        # Output fields
-        out_fields = QgsFields()
-        out_fields.append(QgsField("NodeID", QVariant.String))
-        out_fields.append(QgsField("PlotID", QVariant.String))
-        out_fields.append(QgsField("TRACTStatus", QVariant.String))
-        out_fields.append(QgsField("TRACTIssue", QVariant.String))
+        # Build excluded fields set (fields mapped to NodeID/PlotID via "Use existing field")
+        excluded_fields = set()
+        if node_use_existing and node_field_name:
+            excluded_fields.add(node_field_name)
+        if plot_existing and plot_field_name:
+            excluded_fields.add(plot_field_name)
+
+        # Output fields: original layer fields (with exclusion/rename) + TRACT fields
+        out_fields, rename_map = self._build_output_fields(layer.fields(), excluded_fields)
 
         geom_type = layer.wkbType()
         geom_type_2d = QgsWkbTypes.dropZ(geom_type)
@@ -956,6 +1101,7 @@ class TractGeolocationFormatter:
         skipped_count = 0
 
         small_area_features = []  # list of (fid, area_ha)
+        small_area_part_features = []  # list of (fid, part_idx, part_area_ha)
         polygon_hole_features = []  # list of fids
         tract_manual_fix_features = []  # list of (fid, [errors])
 
@@ -1284,6 +1430,51 @@ class TractGeolocationFormatter:
                         "message": f"Area below minimum ({area_ha:.4f} ha < {MIN_PLOT_AREA_HA} ha)"
                     })
 
+                # Per-part minimum area check (multipolygons with 2+ parts only)
+                if geom.isMultipart():
+                    multipoly = geom.asMultiPolygon()
+                    if len(multipoly) > 1:
+                        for part_idx, part in enumerate(multipoly, start=1):
+                            try:
+                                part_geom = QgsGeometry.fromPolygonXY(part)
+                                part_area_geom = QgsGeometry(part_geom)
+                                part_area_geom.transform(area_transform)
+                                part_area_m2 = part_area_geom.area()
+                                part_area_ha = part_area_m2 / 10000.0
+                            except Exception:
+                                continue
+
+                            if part_area_ha < MIN_PLOT_AREA_HA:
+                                small_area_part_features.append((f.id(), part_idx, part_area_ha))
+                                feature_status = "NEEDS_FIX"
+                                feature_issues.append(
+                                    f"Polygon part {part_idx} area below minimum "
+                                    f"({part_area_ha:.4f} ha < {MIN_PLOT_AREA_HA} ha)"
+                                )
+
+                                node_id, plot_id = self._get_ids(
+                                    f,
+                                    layer,
+                                    node_use_existing,
+                                    node_field_name,
+                                    node_same,
+                                    node_same_value,
+                                    plot_existing,
+                                    plot_field_name,
+                                )
+
+                                validation_rows.append({
+                                    "feature_id": f.id(),
+                                    "NodeID": node_id,
+                                    "PlotID": plot_id,
+                                    "status": "ERROR",
+                                    "issue_type": "small_area_part",
+                                    "message": (
+                                        f"Polygon part {part_idx} area below minimum "
+                                        f"({part_area_ha:.4f} ha < {MIN_PLOT_AREA_HA} ha)"
+                                    ),
+                                })
+
                 # Polygon holes detection (report only)
                 has_holes = False
 
@@ -1330,6 +1521,16 @@ class TractGeolocationFormatter:
 
                 new_feat = QgsFeature(out_fields)
 
+                # Copy original field values
+                for field in layer.fields():
+                    name = field.name()
+                    if name in excluded_fields:
+                        continue
+                    source_idx = layer.fields().indexFromName(name)
+                    val = f.attributes()[source_idx]
+                    output_name = rename_map.get(name, name)
+                    new_feat[output_name] = val
+
                 # NodeID
                 if node_use_existing:
                     attrs = f.attributes()
@@ -1338,6 +1539,15 @@ class TractGeolocationFormatter:
                     new_feat["NodeID"] = "" if val is None else str(val)
                 elif node_same:
                     new_feat["NodeID"] = node_same_value
+                elif node_build:
+                    new_feat["NodeID"] = self._build_expression_value(
+                        f, layer,
+                        node_build_params["prefix"],
+                        node_build_params["field1"],
+                        node_build_params["field2"],
+                        node_build_params["suffix"],
+                        node_build_params["separator"],
+                    )
                 else:
                     new_feat["NodeID"] = f"{node_prefix}{written_count + 1}"
 
@@ -1349,6 +1559,15 @@ class TractGeolocationFormatter:
                     plot_idx = layer.fields().indexFromName(plot_field_name)
                     val = attrs[plot_idx] if plot_idx != -1 else None
                     new_feat["PlotID"] = "" if val is None else str(val)
+                elif plot_build:
+                    new_feat["PlotID"] = self._build_expression_value(
+                        f, layer,
+                        plot_build_params["prefix"],
+                        plot_build_params["field1"],
+                        plot_build_params["field2"],
+                        plot_build_params["suffix"],
+                        plot_build_params["separator"],
+                    )
                 elif plot_auto:
                     new_feat["PlotID"] = "{}{}".format(plot_prefix, written_count + 1)
                 else:
@@ -1476,7 +1695,7 @@ class TractGeolocationFormatter:
 
         # --- Blocking validation errors (grouped) ---
         # --- Written features requiring manual fix (grouped) ---
-        if small_area_features or polygon_hole_features or tract_manual_fix_features:
+        if small_area_features or small_area_part_features or polygon_hole_features or tract_manual_fix_features:
             summary_lines.append("")
             summary_lines.append(self.tr("Written features requiring manual fix:"))
 
@@ -1492,6 +1711,21 @@ class TractGeolocationFormatter:
                 if len(small_area_features) > 500:
                     summary_lines.append(
                         f"  ... and {len(small_area_features) - 500} more polygons."
+                    )
+
+            if small_area_part_features:
+                summary_lines.append("")
+                summary_lines.append(
+                    self.tr("Polygon parts below minimum area ({} ha):").format(MIN_PLOT_AREA_HA)
+                )
+                for fid, part_idx, area in small_area_part_features[:500]:
+                    summary_lines.append(
+                        f"  - {_feature_label(fid)}, part {part_idx}: {area:.4f} ha"
+                    )
+
+                if len(small_area_part_features) > 500:
+                    summary_lines.append(
+                        f"  ... and {len(small_area_part_features) - 500} more polygon parts."
                     )
 
             if polygon_hole_features:
