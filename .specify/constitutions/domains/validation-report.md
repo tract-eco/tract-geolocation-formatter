@@ -34,6 +34,7 @@ The report is written as a CSV file in the same directory as the GeoJSON output,
 | `invalid_geometry_unrepaired` | ERROR | makeValid() failed or geometry still invalid |
 | `tract_geometry_validation` | ERROR | Failed one or more TRACT geometry checks |
 | `small_area` | ERROR | Area below 0.05 ha minimum |
+| `small_area_part` | ERROR | Individual polygon part area below 0.05 ha (multipolygons only) |
 | `polygon_holes` | ERROR | Polygon contains interior holes |
 
 ## Report Dialog

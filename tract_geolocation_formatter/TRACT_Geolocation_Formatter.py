@@ -996,6 +996,7 @@ class TractGeolocationFormatter:
         skipped_count = 0
 
         small_area_features = []  # list of (fid, area_ha)
+        small_area_part_features = []  # list of (fid, part_idx, part_area_ha)
         polygon_hole_features = []  # list of fids
         tract_manual_fix_features = []  # list of (fid, [errors])
 
@@ -1324,6 +1325,51 @@ class TractGeolocationFormatter:
                         "message": f"Area below minimum ({area_ha:.4f} ha < {MIN_PLOT_AREA_HA} ha)"
                     })
 
+                # Per-part minimum area check (multipolygons with 2+ parts only)
+                if geom.isMultipart():
+                    multipoly = geom.asMultiPolygon()
+                    if len(multipoly) > 1:
+                        for part_idx, part in enumerate(multipoly, start=1):
+                            try:
+                                part_geom = QgsGeometry.fromPolygonXY(part)
+                                part_area_geom = QgsGeometry(part_geom)
+                                part_area_geom.transform(area_transform)
+                                part_area_m2 = part_area_geom.area()
+                                part_area_ha = part_area_m2 / 10000.0
+                            except Exception:
+                                continue
+
+                            if part_area_ha < MIN_PLOT_AREA_HA:
+                                small_area_part_features.append((f.id(), part_idx, part_area_ha))
+                                feature_status = "NEEDS_FIX"
+                                feature_issues.append(
+                                    f"Polygon part {part_idx} area below minimum "
+                                    f"({part_area_ha:.4f} ha < {MIN_PLOT_AREA_HA} ha)"
+                                )
+
+                                node_id, plot_id = self._get_ids(
+                                    f,
+                                    layer,
+                                    node_use_existing,
+                                    node_field_name,
+                                    node_same,
+                                    node_same_value,
+                                    plot_existing,
+                                    plot_field_name,
+                                )
+
+                                validation_rows.append({
+                                    "feature_id": f.id(),
+                                    "NodeID": node_id,
+                                    "PlotID": plot_id,
+                                    "status": "ERROR",
+                                    "issue_type": "small_area_part",
+                                    "message": (
+                                        f"Polygon part {part_idx} area below minimum "
+                                        f"({part_area_ha:.4f} ha < {MIN_PLOT_AREA_HA} ha)"
+                                    ),
+                                })
+
                 # Polygon holes detection (report only)
                 has_holes = False
 
@@ -1526,7 +1572,7 @@ class TractGeolocationFormatter:
 
         # --- Blocking validation errors (grouped) ---
         # --- Written features requiring manual fix (grouped) ---
-        if small_area_features or polygon_hole_features or tract_manual_fix_features:
+        if small_area_features or small_area_part_features or polygon_hole_features or tract_manual_fix_features:
             summary_lines.append("")
             summary_lines.append(self.tr("Written features requiring manual fix:"))
 
@@ -1542,6 +1588,21 @@ class TractGeolocationFormatter:
                 if len(small_area_features) > 500:
                     summary_lines.append(
                         f"  ... and {len(small_area_features) - 500} more polygons."
+                    )
+
+            if small_area_part_features:
+                summary_lines.append("")
+                summary_lines.append(
+                    self.tr("Polygon parts below minimum area ({} ha):").format(MIN_PLOT_AREA_HA)
+                )
+                for fid, part_idx, area in small_area_part_features[:500]:
+                    summary_lines.append(
+                        f"  - {_feature_label(fid)}, part {part_idx}: {area:.4f} ha"
+                    )
+
+                if len(small_area_part_features) > 500:
+                    summary_lines.append(
+                        f"  ... and {len(small_area_part_features) - 500} more polygon parts."
                     )
 
             if polygon_hole_features:

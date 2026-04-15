@@ -31,6 +31,7 @@ These issues are detected but cannot be auto-repaired. They set `TRACTStatus = "
 | Fewer than 3 unique coords | Ring body has < 3 distinct points | Polygon is degenerate — redraw |
 | Boundary self-intersections | Shapely: `not boundary.is_simple` | Resolve self-crossing boundaries |
 | Area below minimum | Area < 0.05 ha (EPSG:6933) | Merge with adjacent polygon or remove |
+| Polygon part area below minimum | Individual part area < 0.05 ha in multipolygon (EPSG:6933) | Remove sliver part or merge with adjacent part |
 | Interior holes | Ring count > 1 in any polygon part | Remove holes or split into separate polygons |
 
 ## Skipped Features
