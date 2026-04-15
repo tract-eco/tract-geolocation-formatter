@@ -220,6 +220,12 @@ class TractGeolocationFormatter:
             self.dlg.nodeExistingRadio.toggled.connect(self._update_nodeid_ui_state)
             self.dlg.nodeSameRadio.toggled.connect(self._update_nodeid_ui_state)
             self.dlg.nodeAutoRadio.toggled.connect(self._update_nodeid_ui_state)
+            self.dlg.nodeBuildRadio.toggled.connect(self._update_nodeid_ui_state)
+            # Connect PlotID radio buttons
+            self.dlg.plotNoneRadio.toggled.connect(self._update_plotid_ui_state)
+            self.dlg.plotExistingRadio.toggled.connect(self._update_plotid_ui_state)
+            self.dlg.plotAutoRadio.toggled.connect(self._update_plotid_ui_state)
+            self.dlg.plotBuildRadio.toggled.connect(self._update_plotid_ui_state)
 
         # Populate dialog every time (layers, fields, defaults)
         self._populate_dialog()
@@ -267,14 +273,22 @@ class TractGeolocationFormatter:
         self.dlg.nodeExistingRadio.setChecked(True)
         self.dlg.nodeSameRadio.setChecked(False)
         self.dlg.nodeAutoRadio.setChecked(False)
+        self.dlg.nodeBuildRadio.setChecked(False)
 
         self.dlg.nodeSameLineEdit.setText("")
+        self.dlg.nodeBuildSepLineEdit.setText("_")
+        self.dlg.nodeBuildPrefixLineEdit.setText("")
+        self.dlg.nodeBuildSuffixLineEdit.setText("")
 
         self.dlg.plotNoneRadio.setChecked(True)
         self.dlg.plotExistingRadio.setChecked(False)
         self.dlg.plotAutoRadio.setChecked(False)
+        self.dlg.plotBuildRadio.setChecked(False)
 
         self.dlg.plotPrefixLineEdit.setText("")
+        self.dlg.plotBuildSepLineEdit.setText("_")
+        self.dlg.plotBuildPrefixLineEdit.setText("")
+        self.dlg.plotBuildSuffixLineEdit.setText("")
 
         # Populate field combos based on current layer
         self._populate_field_combos()
@@ -290,20 +304,32 @@ class TractGeolocationFormatter:
 
         self.dlg.layerComboBox.currentIndexChanged.connect(self._on_layer_changed)
 
-        # Enable/disable stat is refreshed when dialog opens
+        # Enable/disable state is refreshed when dialog opens
         self._update_nodeid_ui_state()
+        self._update_plotid_ui_state()
 
     def _update_nodeid_ui_state(self):
         """Enable only the relevant NodeID input widget."""
         self.dlg.nodeFieldCombo.setEnabled(self.dlg.nodeExistingRadio.isChecked())
         self.dlg.nodeSameLineEdit.setEnabled(self.dlg.nodeSameRadio.isChecked())
         self.dlg.nodePrefixLineEdit.setEnabled(self.dlg.nodeAutoRadio.isChecked())
+        self.dlg.nodeBuildContainer.setVisible(self.dlg.nodeBuildRadio.isChecked())
+
+    def _update_plotid_ui_state(self):
+        """Enable only the relevant PlotID input widget."""
+        self.dlg.plotFieldCombo.setEnabled(self.dlg.plotExistingRadio.isChecked())
+        self.dlg.plotPrefixLineEdit.setEnabled(self.dlg.plotAutoRadio.isChecked())
+        self.dlg.plotBuildContainer.setVisible(self.dlg.plotBuildRadio.isChecked())
 
     def _populate_field_combos(self):
         """Populate NodeID and PlotID field comboboxes from selected layer."""
         idx = self.dlg.layerComboBox.currentIndex()
         self.dlg.nodeFieldCombo.clear()
         self.dlg.plotFieldCombo.clear()
+        self.dlg.nodeBuildField1Combo.clear()
+        self.dlg.nodeBuildField2Combo.clear()
+        self.dlg.plotBuildField1Combo.clear()
+        self.dlg.plotBuildField2Combo.clear()
 
         if idx < 0 or idx >= len(self._polygon_layers):
             return
@@ -313,6 +339,14 @@ class TractGeolocationFormatter:
 
         self.dlg.nodeFieldCombo.addItems(field_names)
         self.dlg.plotFieldCombo.addItems(field_names)
+
+        # Expression field combos — Field 2 gets an empty first entry (optional)
+        self.dlg.nodeBuildField1Combo.addItems(field_names)
+        self.dlg.nodeBuildField2Combo.addItem("")
+        self.dlg.nodeBuildField2Combo.addItems(field_names)
+        self.dlg.plotBuildField1Combo.addItems(field_names)
+        self.dlg.plotBuildField2Combo.addItem("")
+        self.dlg.plotBuildField2Combo.addItems(field_names)
 
     def _on_layer_changed(self):
         """Refresh field combos and apply default selections when layer changes."""
@@ -523,6 +557,37 @@ class TractGeolocationFormatter:
                 plot_val = "" if v is None else str(v)
 
         return node_val, plot_val
+
+    def _build_expression_value(self, feature, layer, prefix, field1_name, field2_name, suffix, separator):
+        """
+        Build an ID from expression parts, joining non-empty parts with the separator.
+
+        Parts: prefix, field1 value, field2 value, suffix.
+        Empty/null parts are omitted (no double separators).
+        """
+        parts = []
+
+        if prefix:
+            parts.append(prefix)
+
+        if field1_name:
+            idx = layer.fields().indexFromName(field1_name)
+            if idx != -1:
+                val = feature.attributes()[idx]
+                if val is not None and str(val) != "":
+                    parts.append(str(val))
+
+        if field2_name:
+            idx = layer.fields().indexFromName(field2_name)
+            if idx != -1:
+                val = feature.attributes()[idx]
+                if val is not None and str(val) != "":
+                    parts.append(str(val))
+
+        if suffix:
+            parts.append(suffix)
+
+        return separator.join(parts)
 
     def _build_output_fields(self, layer_fields, excluded_fields):
         """
@@ -827,6 +892,7 @@ class TractGeolocationFormatter:
         node_use_existing = self.dlg.nodeExistingRadio.isChecked()
         node_same = self.dlg.nodeSameRadio.isChecked()
         node_auto = self.dlg.nodeAutoRadio.isChecked()
+        node_build = self.dlg.nodeBuildRadio.isChecked()
 
         # Fixed NodeID value for all polygons
         node_same_value = ""
@@ -838,8 +904,27 @@ class TractGeolocationFormatter:
         if node_auto:
             node_prefix = self.dlg.nodePrefixLineEdit.text() or ""
 
+        # Build from expression params
+        node_build_params = {}
+        if node_build:
+            node_build_field1 = self.dlg.nodeBuildField1Combo.currentText()
+            if not node_build_field1:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    self.tr("TRACT Geolocation Formatter"),
+                    self.tr("Please select at least Field 1 for the NodeID expression."),
+                )
+                return
+            node_build_params = {
+                "prefix": self.dlg.nodeBuildPrefixLineEdit.text().strip(),
+                "field1": node_build_field1,
+                "field2": self.dlg.nodeBuildField2Combo.currentText() or "",
+                "suffix": self.dlg.nodeBuildSuffixLineEdit.text().strip(),
+                "separator": self.dlg.nodeBuildSepLineEdit.text() or "_",
+            }
+
         # Must choose one method
-        if not node_use_existing and not node_same and not node_auto:
+        if not node_use_existing and not node_same and not node_auto and not node_build:
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 self.tr("TRACT Geolocation Formatter"),
@@ -871,6 +956,7 @@ class TractGeolocationFormatter:
         plot_none = self.dlg.plotNoneRadio.isChecked()
         plot_existing = self.dlg.plotExistingRadio.isChecked()
         plot_auto = self.dlg.plotAutoRadio.isChecked()
+        plot_build = self.dlg.plotBuildRadio.isChecked()
 
         plot_field_name = None
         plot_prefix = ""
@@ -886,6 +972,25 @@ class TractGeolocationFormatter:
                 return
         elif plot_auto:
             plot_prefix = self.dlg.plotPrefixLineEdit.text() or ""
+
+        # Build from expression params - PlotID
+        plot_build_params = {}
+        if plot_build:
+            plot_build_field1 = self.dlg.plotBuildField1Combo.currentText()
+            if not plot_build_field1:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    self.tr("TRACT Geolocation Formatter"),
+                    self.tr("Please select at least Field 1 for the PlotID expression."),
+                )
+                return
+            plot_build_params = {
+                "prefix": self.dlg.plotBuildPrefixLineEdit.text().strip(),
+                "field1": plot_build_field1,
+                "field2": self.dlg.plotBuildField2Combo.currentText() or "",
+                "suffix": self.dlg.plotBuildSuffixLineEdit.text().strip(),
+                "separator": self.dlg.plotBuildSepLineEdit.text() or "_",
+            }
 
         # Output path
         output_path = self.dlg.outputPathLineEdit.text().strip()
@@ -1434,6 +1539,15 @@ class TractGeolocationFormatter:
                     new_feat["NodeID"] = "" if val is None else str(val)
                 elif node_same:
                     new_feat["NodeID"] = node_same_value
+                elif node_build:
+                    new_feat["NodeID"] = self._build_expression_value(
+                        f, layer,
+                        node_build_params["prefix"],
+                        node_build_params["field1"],
+                        node_build_params["field2"],
+                        node_build_params["suffix"],
+                        node_build_params["separator"],
+                    )
                 else:
                     new_feat["NodeID"] = f"{node_prefix}{written_count + 1}"
 
@@ -1445,6 +1559,15 @@ class TractGeolocationFormatter:
                     plot_idx = layer.fields().indexFromName(plot_field_name)
                     val = attrs[plot_idx] if plot_idx != -1 else None
                     new_feat["PlotID"] = "" if val is None else str(val)
+                elif plot_build:
+                    new_feat["PlotID"] = self._build_expression_value(
+                        f, layer,
+                        plot_build_params["prefix"],
+                        plot_build_params["field1"],
+                        plot_build_params["field2"],
+                        plot_build_params["suffix"],
+                        plot_build_params["separator"],
+                    )
                 elif plot_auto:
                     new_feat["PlotID"] = "{}{}".format(plot_prefix, written_count + 1)
                 else:

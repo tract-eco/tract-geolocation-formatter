@@ -130,6 +130,89 @@
        </layout>
       </item>
 
+      <!-- Build from expression -->
+      <item>
+       <widget class="QRadioButton" name="nodeBuildRadio">
+        <property name="text">
+         <string>Build from expression</string>
+        </property>
+       </widget>
+      </item>
+
+      <item>
+       <widget class="QWidget" name="nodeBuildContainer">
+        <layout class="QVBoxLayout" name="nodeBuildLayout">
+         <item>
+          <layout class="QHBoxLayout" name="nodeBuildSepLayout">
+           <item>
+            <widget class="QLabel" name="nodeBuildSepLabel">
+             <property name="text"><string>Separator:</string></property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLineEdit" name="nodeBuildSepLineEdit">
+             <property name="text"><string>_</string></property>
+             <property name="maximumSize"><size><width>60</width><height>16777215</height></size></property>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <layout class="QHBoxLayout" name="nodeBuildPrefixLayout">
+           <item>
+            <widget class="QLabel" name="nodeBuildPrefixLabel">
+             <property name="text"><string>Prefix:</string></property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLineEdit" name="nodeBuildPrefixLineEdit">
+             <property name="placeholderText"><string>e.g. BR</string></property>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <layout class="QHBoxLayout" name="nodeBuildField1Layout">
+           <item>
+            <widget class="QLabel" name="nodeBuildField1Label">
+             <property name="text"><string>Field 1:</string></property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="nodeBuildField1Combo"/>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <layout class="QHBoxLayout" name="nodeBuildField2Layout">
+           <item>
+            <widget class="QLabel" name="nodeBuildField2Label">
+             <property name="text"><string>Field 2 (optional):</string></property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="nodeBuildField2Combo"/>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <layout class="QHBoxLayout" name="nodeBuildSuffixLayout">
+           <item>
+            <widget class="QLabel" name="nodeBuildSuffixLabel">
+             <property name="text"><string>Suffix:</string></property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLineEdit" name="nodeBuildSuffixLineEdit">
+             <property name="placeholderText"><string>e.g. end</string></property>
+            </widget>
+           </item>
+          </layout>
+         </item>
+        </layout>
+       </widget>
+      </item>
+
      </layout>
     </widget>
    </item>
@@ -198,6 +281,89 @@
          </widget>
         </item>
        </layout>
+      </item>
+
+      <!-- Build from expression -->
+      <item>
+       <widget class="QRadioButton" name="plotBuildRadio">
+        <property name="text">
+         <string>Build from expression</string>
+        </property>
+       </widget>
+      </item>
+
+      <item>
+       <widget class="QWidget" name="plotBuildContainer">
+        <layout class="QVBoxLayout" name="plotBuildLayout">
+         <item>
+          <layout class="QHBoxLayout" name="plotBuildSepLayout">
+           <item>
+            <widget class="QLabel" name="plotBuildSepLabel">
+             <property name="text"><string>Separator:</string></property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLineEdit" name="plotBuildSepLineEdit">
+             <property name="text"><string>_</string></property>
+             <property name="maximumSize"><size><width>60</width><height>16777215</height></size></property>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <layout class="QHBoxLayout" name="plotBuildPrefixLayout">
+           <item>
+            <widget class="QLabel" name="plotBuildPrefixLabel">
+             <property name="text"><string>Prefix:</string></property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLineEdit" name="plotBuildPrefixLineEdit">
+             <property name="placeholderText"><string>e.g. PLOT</string></property>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <layout class="QHBoxLayout" name="plotBuildField1Layout">
+           <item>
+            <widget class="QLabel" name="plotBuildField1Label">
+             <property name="text"><string>Field 1:</string></property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="plotBuildField1Combo"/>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <layout class="QHBoxLayout" name="plotBuildField2Layout">
+           <item>
+            <widget class="QLabel" name="plotBuildField2Label">
+             <property name="text"><string>Field 2 (optional):</string></property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="plotBuildField2Combo"/>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <layout class="QHBoxLayout" name="plotBuildSuffixLayout">
+           <item>
+            <widget class="QLabel" name="plotBuildSuffixLabel">
+             <property name="text"><string>Suffix:</string></property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QLineEdit" name="plotBuildSuffixLineEdit">
+             <property name="placeholderText"><string>e.g. end</string></property>
+            </widget>
+           </item>
+          </layout>
+         </item>
+        </layout>
+       </widget>
       </item>
 
      </layout>
