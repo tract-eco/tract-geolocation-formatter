@@ -2,7 +2,7 @@
 name=TRACT Geolocation Formatter
 qgisMinimumVersion=3.0
 description=Validate, clean, and convert geolocation layers into the TRACT GeoJSON template for sustainability and traceability workflows.
-version=0.1.0
+version=0.2.0
 author=Luis Carrasco
 email=luiscartor@gmail.com
 
@@ -16,6 +16,14 @@ homepage=https://github.com/tract-eco/tract-geolocation-formatter
 hasProcessingProvider=no
 
 changelog=
+    0.2.0
+    - Preserve original input fields in the output GeoJSON alongside TRACT fields
+    - Handle field name clashes with TRACT fields using _orig suffix
+    - Exclude fields mapped to NodeID/PlotID via "Use existing field" from output
+    - Check minimum area on individual polygon parts for multipolygon features
+    - Separate reporting for whole-polygon vs per-part area issues in summary report
+    - Add "Build from expression" option for NodeID and PlotID (prefix + up to 2 fields + suffix with custom separator)
+    - Add PlotID UI state management (enable/disable controls based on selected option)
     0.1.0 Initial release
     - Validate polygon geometries
     - Remove duplicate vertices
