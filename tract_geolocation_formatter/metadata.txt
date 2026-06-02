@@ -2,7 +2,7 @@
 name=TRACT Geolocation Formatter
 qgisMinimumVersion=3.0
 description=Validate, clean, and convert geolocation layers into the TRACT GeoJSON template for sustainability and traceability workflows.
-version=0.2.0
+version=0.3.0
 author=Luis Carrasco
 email=luiscartor@gmail.com
 
@@ -16,6 +16,11 @@ homepage=https://github.com/tract-eco/tract-geolocation-formatter
 hasProcessingProvider=no
 
 changelog=
+    0.3.0
+    - Compatible with QGIS 4 (Qt6/PyQt6) and QGIS 3.x (Qt5/PyQt5) from a single codebase
+    - Dialog UI now loaded at runtime from .ui (no generated form file shipped)
+    - Replaced compiled Qt resources with filesystem icon loading
+    - Internal: scoped Qt enums, .exec() everywhere, version-safe QgsField string type
     0.2.0
     - Preserve original input fields in the output GeoJSON alongside TRACT fields
     - Handle field name clashes with TRACT fields using _orig suffix

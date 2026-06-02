@@ -3,10 +3,16 @@
 Dialog wrapper for TRACT Geolocation Formatter
 """
 
-from qgis.PyQt import QtWidgets
-from .TRACT_Geolocation_Formatter_dialog_base import Ui_TractGeolocationFormatterDialogBase
+import os
 
-class TractGeolocationFormatterDialog(QtWidgets.QDialog, Ui_TractGeolocationFormatterDialogBase):
+from qgis.PyQt import uic, QtWidgets
+
+FORM_CLASS, _ = uic.loadUiType(
+    os.path.join(os.path.dirname(__file__), 'TRACT_Geolocation_Formatter_dialog_base.ui')
+)
+
+
+class TractGeolocationFormatterDialog(QtWidgets.QDialog, FORM_CLASS):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setupUi(self)

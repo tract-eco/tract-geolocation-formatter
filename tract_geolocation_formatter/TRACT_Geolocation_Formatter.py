@@ -27,7 +27,7 @@ import re
 import json
 from shapely.geometry import shape
 
-from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, QVariant, Qt
+from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import (
     QAction,
@@ -58,7 +58,15 @@ from qgis.core import (
     QgsVectorLayer
 )
 
-from .resources_rc import *
+# Version-safe string field type for QgsField construction.
+# QGIS 4 / Qt6 uses QMetaType; QGIS 3.x / Qt5 uses QVariant.
+try:
+    from qgis.PyQt.QtCore import QMetaType
+    STRING_FIELD_TYPE = QMetaType.Type.QString
+except (ImportError, AttributeError):
+    from qgis.PyQt.QtCore import QVariant as _QVariant
+    STRING_FIELD_TYPE = _QVariant.String
+
 from .TRACT_Geolocation_Formatter_dialog import TractGeolocationFormatterDialog
 
 # Constants for Minimum Area Checks
@@ -192,7 +200,7 @@ class TractGeolocationFormatter:
 
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
-        icon_path = ':/plugins/tract_geolocation_formatter/icon.png'
+        icon_path = os.path.join(self.plugin_dir, 'icon.png')
         self.add_action(
             icon_path,
             text=self.tr('TRACT Geolocation Formatter'),
@@ -230,7 +238,7 @@ class TractGeolocationFormatter:
         # Populate dialog every time (layers, fields, defaults)
         self._populate_dialog()
 
-        result = self.dlg.exec_()
+        result = self.dlg.exec()
         if not result:
             return
 
@@ -616,10 +624,10 @@ class TractGeolocationFormatter:
             else:
                 out_fields.append(QgsField(name, field.type()))
 
-        out_fields.append(QgsField("NodeID", QVariant.String))
-        out_fields.append(QgsField("PlotID", QVariant.String))
-        out_fields.append(QgsField("TRACTStatus", QVariant.String))
-        out_fields.append(QgsField("TRACTIssue", QVariant.String))
+        out_fields.append(QgsField("NodeID", STRING_FIELD_TYPE))
+        out_fields.append(QgsField("PlotID", STRING_FIELD_TYPE))
+        out_fields.append(QgsField("TRACTStatus", STRING_FIELD_TYPE))
+        out_fields.append(QgsField("TRACTIssue", STRING_FIELD_TYPE))
 
         return out_fields, rename_map
 
@@ -839,11 +847,11 @@ class TractGeolocationFormatter:
         report_text_edit.setPlainText(summary_text)
         layout.addWidget(report_text_edit)
 
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok, parent=dialog)
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, parent=dialog)
         button_box.accepted.connect(dialog.accept)
         layout.addWidget(button_box)
 
-        dialog.exec_()
+        dialog.exec()
 
 
     def _run_transformation_from_dialog(self):
@@ -1119,7 +1127,7 @@ class TractGeolocationFormatter:
         progress.setMaximum(total_features)
         progress.setValue(0)
         progress.setFormat("%v / %m")
-        progress.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        progress.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         progress_message.layout().addWidget(progress)
         progress_item = self.iface.messageBar().pushWidget(progress_message, Qgis.Info)
 
