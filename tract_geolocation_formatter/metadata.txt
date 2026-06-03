@@ -1,6 +1,7 @@
 [general]
 name=TRACT Geolocation Formatter
 qgisMinimumVersion=3.0
+qgisMaximumVersion=4.99
 description=Validate, clean, and convert geolocation layers into the TRACT GeoJSON template for sustainability and traceability workflows.
 version=0.3.0
 author=Luis Carrasco
