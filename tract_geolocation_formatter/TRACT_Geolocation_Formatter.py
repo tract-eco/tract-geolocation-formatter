@@ -25,7 +25,7 @@
 import os
 import re
 import json
-from shapely.geometry import shape
+from shapely.geometry import shape, LineString
 
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
 from qgis.PyQt.QtGui import QIcon
@@ -76,6 +76,157 @@ COORD_DECIMALS = 6
 
 # TRACT output field names — used to detect clashes with input layer fields
 TRACT_FIELD_NAMES = {"NodeID", "PlotID", "TRACTStatus", "TRACTIssue"}
+
+
+# ---------------------------------------------------------------------------
+# Self-intersection coordinate helpers (GH-7)
+#
+# Pure-Shapely helpers; no QGIS imports required at call time. Kept at module
+# level so they are unit-testable directly. See:
+#   .specify/specs/archive/GH-7-self-intersection-coordinates/plan.md
+# ---------------------------------------------------------------------------
+
+def _extract_intersection_points(inter):
+    """Flatten a Shapely intersection result to a list of (x, y) tuples.
+
+    Handles Point, MultiPoint and GeometryCollection. Skips LineString /
+    MultiLineString (collinear overlap — represents a different topology
+    issue, already covered by the duplicate-vertices check).
+    """
+    if inter.is_empty:
+        return []
+    gt = inter.geom_type
+    if gt == "Point":
+        return [(inter.x, inter.y)]
+    if gt == "MultiPoint":
+        return [(p.x, p.y) for p in inter.geoms]
+    if gt == "GeometryCollection":
+        out = []
+        for g in inter.geoms:
+            out.extend(_extract_intersection_points(g))
+        return out
+    return []
+
+
+def _dedupe_points(points, tolerance=1e-6):
+    """Drop points within Euclidean ``tolerance`` of an already-kept point.
+
+    Preserves iteration order. O(n²) — fine for the small lists we generate
+    (typically < 20 raw points even on pathological inputs).
+    """
+    deduped = []
+    for p in points:
+        is_dup = False
+        for q in deduped:
+            dx = p[0] - q[0]
+            dy = p[1] - q[1]
+            if (dx * dx + dy * dy) ** 0.5 <= tolerance:
+                is_dup = True
+                break
+        if not is_dup:
+            deduped.append(p)
+    return deduped
+
+
+def _find_self_intersection_points_in_shape(sg):
+    """Find boundary self-intersection points in a Shapely Polygon/MultiPolygon.
+
+    Algorithm: flatten all boundary rings of all polygons (and all components
+    of a MultiPolygon) into a single tagged segment list, then do all-pairs
+    iteration. Adjacency skipping applies **only within the same ring**:
+
+    - Same-ring pairs with absolute index difference < 2 are skipped (truly
+      adjacent in the ring).
+    - For closed rings, the ``(0, n-1)`` pair is also skipped (adjacency via
+      the ring closure).
+    - **Cross-ring** and **cross-component** pairs are *always* checked,
+      because that's where touches show up after GEOS ``makeValid()`` has
+      repaired a self-intersecting polygon into two components that touch at
+      the original crossing point. The pipeline runs ``makeValid()`` before
+      this helper (constitution § 2 step 6), so the cross-ring case is the
+      common one in practice.
+
+    Collects Point / MultiPoint results; skips collinear-overlap LineString
+    results (those represent a different topology issue, already covered by
+    the duplicate-vertices check).
+
+    Returns a deduped (within 1e-6 Euclidean distance) list of ``(lon, lat)``
+    tuples in iteration order.
+    """
+    if sg is None or sg.is_empty:
+        return []
+
+    # Flatten boundary rings to (ring_id, seg_idx_in_ring, num_segments_in_ring,
+    # is_closed, LineString segment). Adjacency is per-ring; ring_id is unique
+    # across all rings of all components.
+    tagged = []
+    ring_id = 0
+
+    def _walk_polygon(poly):
+        nonlocal ring_id
+        if poly.is_empty:
+            return
+        boundary = poly.boundary
+        if boundary.is_empty:
+            return
+        rings = list(boundary.geoms) if boundary.geom_type == "MultiLineString" else [boundary]
+        for ring in rings:
+            coords = list(ring.coords)
+            num_segments = len(coords) - 1
+            if num_segments < 3:
+                ring_id += 1
+                continue
+            is_closed = coords[0] == coords[-1]
+            for seg_idx in range(num_segments):
+                seg = LineString([coords[seg_idx], coords[seg_idx + 1]])
+                tagged.append((ring_id, seg_idx, num_segments, is_closed, seg))
+            ring_id += 1
+
+    if sg.geom_type == "MultiPolygon":
+        for poly in sg.geoms:
+            _walk_polygon(poly)
+    elif sg.geom_type == "Polygon":
+        _walk_polygon(sg)
+    else:
+        return []
+
+    points = []
+    n = len(tagged)
+    for a in range(n):
+        ring_a, idx_a, n_a, closed_a, seg_a = tagged[a]
+        for b in range(a + 1, n):
+            ring_b, idx_b, _n_b, _closed_b, seg_b = tagged[b]
+            if ring_a == ring_b:
+                # Same-ring adjacency
+                diff = abs(idx_a - idx_b)
+                if diff < 2:
+                    continue
+                if closed_a and diff == n_a - 1:
+                    continue
+            # Cross-ring or non-adjacent same-ring: check the intersection
+            points.extend(_extract_intersection_points(seg_a.intersection(seg_b)))
+
+    return _dedupe_points(points)
+
+
+def _format_self_intersection_message(points):
+    """Build the user-facing self-intersection error string (GH-7 / DEC-6, DEC-7).
+
+    - Empty ``points`` → base string only ("Boundary has self-intersections"),
+      preserving DEC-4 backward compatibility.
+    - Otherwise: ``base + " at: " + " | ".join(lon,lat …)`` with 6-decimal
+      formatting per coordinate. Caps at 5 points; appends
+      ``" (and K more)"`` when the input exceeds the cap.
+    """
+    base = "Boundary has self-intersections"
+    if not points:
+        return base
+    cap = 5
+    head = points[:cap]
+    extra = len(points) - cap
+    rendered = " | ".join(f"{lon:.6f},{lat:.6f}" for (lon, lat) in head)
+    suffix = f" (and {extra} more)" if extra > 0 else ""
+    return f"{base} at: {rendered}{suffix}"
 
 
 class TractGeolocationFormatter:
@@ -763,6 +914,27 @@ class TractGeolocationFormatter:
             self._log(f"Shapely boundary self-intersection check failed: {e}")
             return False
 
+    def _find_boundary_self_intersection_points(self, geom: QgsGeometry) -> list[tuple[float, float]]:
+        """
+        Return the deduped (within 1e-6) list of ``(lon, lat)`` boundary
+        self-intersection points for ``geom``. Empty list if the boundary is
+        simple, the geometry is empty, or any Shapely failure occurs.
+
+        Thin wrapper that converts the QgsGeometry to a Shapely shape and
+        delegates to the pure-Python module-level helper
+        ``_find_self_intersection_points_in_shape``. See GH-7 / DEC-8.
+        """
+        if geom is None or geom.isEmpty():
+            return []
+
+        try:
+            geojson_dict = json.loads(geom.asJson())
+            sg = shape(geojson_dict)
+            return _find_self_intersection_points_in_shape(sg)
+        except Exception as e:
+            self._log(f"Shapely self-intersection point finder failed: {e}")
+            return []
+
     def _get_tract_geometry_errors(self, geom: QgsGeometry) -> list[str]:
         """
         Final TRACT-aligned geometry checks. (updated March 2025)
@@ -784,7 +956,8 @@ class TractGeolocationFormatter:
             errors.append("One or more rings have fewer than three unique coordinates.")
 
         if self._has_boundary_self_intersections(geom):
-            errors.append("Boundary has self-intersections")
+            points = self._find_boundary_self_intersection_points(geom)
+            errors.append(_format_self_intersection_message(points))
 
         return errors
 
