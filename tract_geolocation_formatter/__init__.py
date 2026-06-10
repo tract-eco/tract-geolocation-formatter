@@ -24,6 +24,16 @@
 """
 
 
+# GH-6: vendored openpyxl 3.1.5 + et_xmlfile 2.0.0
+# Prepends vendor/ to sys.path so the bundled openpyxl resolves before any
+# system install. Must run before any 'import openpyxl' in the package.
+import os as _os
+import sys as _sys
+_VENDOR_DIR = _os.path.join(_os.path.dirname(__file__), 'vendor')
+if _os.path.isdir(_VENDOR_DIR) and _VENDOR_DIR not in _sys.path:
+    _sys.path.insert(0, _VENDOR_DIR)
+
+
 # noinspection PyPep8Naming
 def classFactory(iface):  # pylint: disable=invalid-name
     """Load TractGeolocationFormatter class from file TractGeolocationFormatter.
