@@ -36,6 +36,7 @@ The plugin works directly on existing QGIS layers and does **not** require advan
 - Ensure consistent schema structure across all features
 - Standardize coordinate precision by rounding geometries to six decimal places
 - Validate polygon geometries (e.g. self-intersections, invalid rings)
+- Report approximate latitude/longitude coordinates of detected boundary self-intersections so they can be located and fixed in QGIS
 - Remove consecutive duplicate vertices
 - Repair invalid geometries using makeValid
 - Detect polygons containing interior holes
@@ -44,6 +45,9 @@ The plugin works directly on existing QGIS layers and does **not** require advan
 - Identify intersecting or overlapping line segments
 - Detect and flag common geometry issues before export
 - Export ready-to-upload GeoJSON files for the TRACT platform
+- Optionally generate a populated **Master Data XLSX** file (Farms or Farmer Groups) alongside the GeoJSON, with one row per unique NodeID and a user-selected country — ready for TRACT ingestion without manual template filling
+- Scrollable dialog so OK / Cancel buttons stay reachable on small / laptop screens
+- Compatible with both **QGIS 3.x** and **QGIS 4** from a single codebase
 - Works with common GIS formats (GeoJSON, Shapefile, GeoPackage)
 
 The plugin attempts to automatically fix some geometry issues where possible. However, certain issues may require manual correction by the user in QGIS before the dataset can be fully validated.
@@ -55,7 +59,7 @@ Designed to be:
 
 ## Output Files
 
-The plugin produces two outputs:
+The plugin produces up to three outputs (the third is opt-in):
 
 1. GeoJSON file structured according to the TRACT geolocation template
 
@@ -81,14 +85,25 @@ The report includes:
 - NodeID and PlotID values
 - Validation status (Warning or Error)
 - Issue type
-- Descriptive messages explaining detected issues or applied repairs
+- Descriptive messages explaining detected issues or applied repairs — including approximate latitude/longitude of boundary self-intersections when detected, so problem locations can be jumped to directly in QGIS
 
 This report helps users quickly identify and correct problematic geometries before submitting data.
+
+3. Master Data XLSX file (optional)
+
+When "Generate Master Data file" is enabled in the dialog, the plugin also writes a populated TRACT Master Data template alongside the GeoJSON, with the filename `<basename>_master_data_farms.xlsx` or `<basename>_master_data_farmer_groups.xlsx` depending on the selected type.
+
+The user picks:
+- Type: **Farms** or **Farmer Groups**
+- Country: a single value applied to every row (selected from TRACT's published country list)
+
+The plugin populates one row per unique NodeID, with the name and reference fields both set to the NodeID, leaving all other template columns untouched. The output preserves the complete TRACT template structure — all sheets, branding, headers, and validation rules — so it can be uploaded to TRACT without any further manual editing.
 
 
 ## Typical Use Cases
 
 - Preparing plot boundaries for ingestion into the TRACT platform
+- Producing a matched pair of geolocation GeoJSON + Master Data XLSX for one-step TRACT upload
 - Adapting customer-provided geolocation data to the TRACT GeoJSON template
 - Validating and cleaning polygons prior to deforestation analysis
 - Pre-checking geolocation data for EUDR-related due diligence workflows
@@ -146,7 +161,7 @@ This repository is structured as a development project, plus a deployable QGIS p
 
 ### Prerequisites
 
-- QGIS 3.x (with its bundled Python)
+- QGIS 3.x or QGIS 4 (with its bundled Python — the plugin runs on both)
 - Python 3 (for development tooling; the exact version should match `pyproject.toml`)
 - Poetry
 

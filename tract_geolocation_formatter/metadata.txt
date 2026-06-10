@@ -18,10 +18,13 @@ hasProcessingProvider=no
 
 changelog=
     0.3.0
-    - Compatible with QGIS 4 (Qt6/PyQt6) and QGIS 3.x (Qt5/PyQt5) from a single codebase
-    - Dialog UI now loaded at runtime from .ui (no generated form file shipped)
-    - Replaced compiled Qt resources with filesystem icon loading
-    - Internal: scoped Qt enums, .exec() everywhere, version-safe QgsField string type
+    - Compatible with QGIS 4 (Qt6/PyQt6) and QGIS 3.x (Qt5/PyQt5) from a single codebase (GH-4)
+    - Dialog UI now loaded at runtime from .ui (no generated form file shipped) (GH-4)
+    - Replaced compiled Qt resources with filesystem icon loading (GH-4)
+    - Internal: scoped Qt enums, .exec() everywhere, version-safe QgsField string type (GH-4)
+    - Dialog is now scrollable so the OK / Cancel buttons stay reachable on small / laptop screens, even when the "Build from expression" controls expand (GH-5)
+    - Optional Master Data XLSX writer alongside the GeoJSON output: pick Farms or Farmer Groups, select a country from TRACT's published list, and the plugin populates the TRACT-published template with one row per unique NodeID (GH-6)
+    - Report approximate (lon, lat) coordinates of detected boundary self-intersections in the validation message, so users can copy them into QGIS's "Zoom to coordinate" widget to fix the geometry in place (GH-7)
     0.2.0
     - Preserve original input fields in the output GeoJSON alongside TRACT fields
     - Handle field name clashes with TRACT fields using _orig suffix
