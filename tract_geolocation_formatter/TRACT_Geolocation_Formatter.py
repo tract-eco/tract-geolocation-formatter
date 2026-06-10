@@ -25,7 +25,7 @@
 import os
 import re
 import json
-from shapely.geometry import shape
+from shapely.geometry import shape, LineString
 
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
 from qgis.PyQt.QtGui import QIcon
@@ -76,6 +76,267 @@ COORD_DECIMALS = 6
 
 # TRACT output field names — used to detect clashes with input layer fields
 TRACT_FIELD_NAMES = {"NodeID", "PlotID", "TRACTStatus", "TRACTIssue"}
+
+
+# ---------------------------------------------------------------------------
+# Self-intersection coordinate helpers (GH-7)
+#
+# Pure-Shapely helpers; no QGIS imports required at call time. Kept at module
+# level so they are unit-testable directly. See:
+#   .specify/specs/archive/GH-7-self-intersection-coordinates/plan.md
+# ---------------------------------------------------------------------------
+
+def _extract_intersection_points(inter):
+    """Flatten a Shapely intersection result to a list of (x, y) tuples.
+
+    Handles Point, MultiPoint and GeometryCollection. Skips LineString /
+    MultiLineString (collinear overlap — represents a different topology
+    issue, already covered by the duplicate-vertices check).
+    """
+    if inter.is_empty:
+        return []
+    gt = inter.geom_type
+    if gt == "Point":
+        return [(inter.x, inter.y)]
+    if gt == "MultiPoint":
+        return [(p.x, p.y) for p in inter.geoms]
+    if gt == "GeometryCollection":
+        out = []
+        for g in inter.geoms:
+            out.extend(_extract_intersection_points(g))
+        return out
+    return []
+
+
+def _dedupe_points(points, tolerance=1e-6):
+    """Drop points within Euclidean ``tolerance`` of an already-kept point.
+
+    Preserves iteration order. O(n²) — fine for the small lists we generate
+    (typically < 20 raw points even on pathological inputs).
+    """
+    deduped = []
+    for p in points:
+        is_dup = False
+        for q in deduped:
+            dx = p[0] - q[0]
+            dy = p[1] - q[1]
+            if (dx * dx + dy * dy) ** 0.5 <= tolerance:
+                is_dup = True
+                break
+        if not is_dup:
+            deduped.append(p)
+    return deduped
+
+
+def _find_self_intersection_points_in_shape(sg):
+    """Find boundary self-intersection points in a Shapely Polygon/MultiPolygon.
+
+    Algorithm: flatten all boundary rings of all polygons (and all components
+    of a MultiPolygon) into a single tagged segment list, then do all-pairs
+    iteration. Adjacency skipping applies **only within the same ring**:
+
+    - Same-ring pairs with absolute index difference < 2 are skipped (truly
+      adjacent in the ring).
+    - For closed rings, the ``(0, n-1)`` pair is also skipped (adjacency via
+      the ring closure).
+    - **Cross-ring** and **cross-component** pairs are *always* checked,
+      because that's where touches show up after GEOS ``makeValid()`` has
+      repaired a self-intersecting polygon into two components that touch at
+      the original crossing point. The pipeline runs ``makeValid()`` before
+      this helper (constitution § 2 step 6), so the cross-ring case is the
+      common one in practice.
+
+    Collects Point / MultiPoint results; skips collinear-overlap LineString
+    results (those represent a different topology issue, already covered by
+    the duplicate-vertices check).
+
+    Returns a deduped (within 1e-6 Euclidean distance) list of ``(lon, lat)``
+    tuples in iteration order.
+    """
+    if sg is None or sg.is_empty:
+        return []
+
+    # Flatten boundary rings to (ring_id, seg_idx_in_ring, num_segments_in_ring,
+    # is_closed, LineString segment). Adjacency is per-ring; ring_id is unique
+    # across all rings of all components.
+    tagged = []
+    ring_id = 0
+
+    def _walk_polygon(poly):
+        nonlocal ring_id
+        if poly.is_empty:
+            return
+        boundary = poly.boundary
+        if boundary.is_empty:
+            return
+        rings = list(boundary.geoms) if boundary.geom_type == "MultiLineString" else [boundary]
+        for ring in rings:
+            coords = list(ring.coords)
+            num_segments = len(coords) - 1
+            if num_segments < 3:
+                ring_id += 1
+                continue
+            is_closed = coords[0] == coords[-1]
+            for seg_idx in range(num_segments):
+                seg = LineString([coords[seg_idx], coords[seg_idx + 1]])
+                tagged.append((ring_id, seg_idx, num_segments, is_closed, seg))
+            ring_id += 1
+
+    if sg.geom_type == "MultiPolygon":
+        for poly in sg.geoms:
+            _walk_polygon(poly)
+    elif sg.geom_type == "Polygon":
+        _walk_polygon(sg)
+    else:
+        return []
+
+    points = []
+    n = len(tagged)
+    for a in range(n):
+        ring_a, idx_a, n_a, closed_a, seg_a = tagged[a]
+        for b in range(a + 1, n):
+            ring_b, idx_b, _n_b, _closed_b, seg_b = tagged[b]
+            if ring_a == ring_b:
+                # Same-ring adjacency
+                diff = abs(idx_a - idx_b)
+                if diff < 2:
+                    continue
+                if closed_a and diff == n_a - 1:
+                    continue
+            # Cross-ring or non-adjacent same-ring: check the intersection
+            points.extend(_extract_intersection_points(seg_a.intersection(seg_b)))
+
+    return _dedupe_points(points)
+
+
+def _format_self_intersection_message(points):
+    """Build the user-facing self-intersection error string (GH-7 / DEC-6, DEC-7).
+
+    - Empty ``points`` → base string only ("Boundary has self-intersections"),
+      preserving DEC-4 backward compatibility.
+    - Otherwise: ``base + " at: " + " | ".join(lon,lat …)`` with 6-decimal
+      formatting per coordinate. Caps at 5 points; appends
+      ``" (and K more)"`` when the input exceeds the cap.
+    """
+    base = "Boundary has self-intersections"
+    if not points:
+        return base
+    cap = 5
+    head = points[:cap]
+    extra = len(points) - cap
+    rendered = " | ".join(f"{lon:.6f},{lat:.6f}" for (lon, lat) in head)
+    suffix = f" (and {extra} more)" if extra > 0 else ""
+    return f"{base} at: {rendered}{suffix}"
+
+
+# ---------------------------------------------------------------------------
+# Master Data XLSX helpers (GH-6)
+#
+# Pure-Python helpers for the optional Master Data XLSX writer. Use openpyxl
+# (vendored at tract_geolocation_formatter/vendor/openpyxl, bootstrapped via
+# __init__.py). Imports are kept lazy inside each function so the plugin's
+# module load doesn't break if the vendor dir is missing — the master-data
+# feature simply surfaces a clear error at use time.
+#
+# See:
+#   .specify/specs/archive/GH-6-master-data-csv/plan.md (post-archive)
+# ---------------------------------------------------------------------------
+
+# Cell mapping per master-data type. Sheet names are extracted verbatim from
+# the templates' xl/workbook.xml — note the differing whitespace: the farms
+# sheet name has NO space after the period, the farmer-groups sheet name HAS
+# a space after the period.
+_MASTER_DATA_MAPPING = {
+    "farms": {
+        "sheet_name": "2.Farms_Template",
+        "name_col": "B",
+        "country_col": "E",
+        "ref_id_col": "I",
+    },
+    "farmer_groups": {
+        "sheet_name": "2. Farmer_Groups Template",
+        "name_col": "A",
+        "country_col": "C",
+        "ref_id_col": "G",
+    },
+}
+
+# Sentinel placeholder text for the country combo box (DEC-11).
+_COUNTRY_COMBO_PLACEHOLDER = "-- select a country --"
+
+
+def _master_data_output_path(geojson_path, master_data_type):
+    """Build the master-data XLSX output path from the GeoJSON output path.
+
+    Strips the .geojson / .json extension and appends
+    ``_master_data_{type}.xlsx``. Pure string manipulation.
+    """
+    base, _ext = os.path.splitext(geojson_path)
+    return f"{base}_master_data_{master_data_type}.xlsx"
+
+
+def _read_country_list_from_template(template_path):
+    """Load TRACT's country list from one of the bundled XLSX templates.
+
+    Reads sheet ``"4. Country_List"``, column B, starting row 2; returns the
+    list of non-empty country names in TRACT's published order.
+
+    Both bundled templates carry the same country list — either can be passed.
+    """
+    import openpyxl  # lazy import (DEC-10 — vendored via __init__.py bootstrap)
+
+    wb = openpyxl.load_workbook(template_path, read_only=True, data_only=True)
+    try:
+        ws = wb["4. Country_List"]
+        countries = []
+        for row in ws.iter_rows(min_row=2, min_col=2, max_col=2, values_only=True):
+            value = row[0]
+            if value:
+                countries.append(value)
+        return countries
+    finally:
+        wb.close()
+
+
+def _write_master_data_xlsx(template_path, output_path, master_data_type, country, unique_node_ids):
+    """Populate a copy of the bundled template with one row per unique NodeID.
+
+    Loads the template into memory, locates the Template sheet by name,
+    writes data rows starting at row 3 into the three columns specified by
+    ``_MASTER_DATA_MAPPING[master_data_type]``, then saves to ``output_path``.
+    Never modifies the template file on disk.
+
+    Args:
+        template_path: filesystem path to the bundled template XLSX.
+        output_path: filesystem path to write the populated XLSX to.
+        master_data_type: ``"farms"`` or ``"farmer_groups"``.
+        country: country name string (full English name from TRACT's list).
+        unique_node_ids: ordered list of NodeID strings; duplicates must
+            have been removed by the caller — the writer does not dedupe.
+
+    Raises:
+        KeyError: if ``master_data_type`` is not in ``_MASTER_DATA_MAPPING``
+            or if the expected sheet is missing from the template.
+    """
+    import openpyxl  # lazy import
+
+    mapping = _MASTER_DATA_MAPPING[master_data_type]
+    wb = openpyxl.load_workbook(template_path)
+    try:
+        ws = wb[mapping["sheet_name"]]
+        name_col = mapping["name_col"]
+        country_col = mapping["country_col"]
+        ref_id_col = mapping["ref_id_col"]
+
+        for offset, node_id in enumerate(unique_node_ids):
+            row = 3 + offset
+            ws[f"{name_col}{row}"] = node_id
+            ws[f"{country_col}{row}"] = country
+            ws[f"{ref_id_col}{row}"] = node_id
+
+        wb.save(output_path)
+    finally:
+        wb.close()
 
 
 class TractGeolocationFormatter:
@@ -234,6 +495,8 @@ class TractGeolocationFormatter:
             self.dlg.plotExistingRadio.toggled.connect(self._update_plotid_ui_state)
             self.dlg.plotAutoRadio.toggled.connect(self._update_plotid_ui_state)
             self.dlg.plotBuildRadio.toggled.connect(self._update_plotid_ui_state)
+            # Connect Master Data checkbox (GH-6)
+            self.dlg.masterDataCheckBox.toggled.connect(self._update_master_data_ui_state)
 
         # Populate dialog every time (layers, fields, defaults)
         self._populate_dialog()
@@ -312,9 +575,17 @@ class TractGeolocationFormatter:
 
         self.dlg.layerComboBox.currentIndexChanged.connect(self._on_layer_changed)
 
+        # Master Data defaults (GH-6) — checkbox off, Farms preselected, country
+        # combo populated with placeholder + 250 entries from TRACT's list.
+        self.dlg.masterDataCheckBox.setChecked(False)
+        self.dlg.farmsTypeRadio.setChecked(True)
+        self._populate_country_combo()
+        self.dlg.countryCombo.setCurrentIndex(0)
+
         # Enable/disable state is refreshed when dialog opens
         self._update_nodeid_ui_state()
         self._update_plotid_ui_state()
+        self._update_master_data_ui_state()
 
     def _update_nodeid_ui_state(self):
         """Enable only the relevant NodeID input widget."""
@@ -328,6 +599,33 @@ class TractGeolocationFormatter:
         self.dlg.plotFieldCombo.setEnabled(self.dlg.plotExistingRadio.isChecked())
         self.dlg.plotPrefixLineEdit.setEnabled(self.dlg.plotAutoRadio.isChecked())
         self.dlg.plotBuildContainer.setVisible(self.dlg.plotBuildRadio.isChecked())
+
+    def _update_master_data_ui_state(self):
+        """Show/hide master-data sub-controls based on the checkbox state (GH-6)."""
+        self.dlg.masterDataContainer.setVisible(self.dlg.masterDataCheckBox.isChecked())
+
+    def _populate_country_combo(self):
+        """Populate the country dropdown from the bundled TRACT template (GH-6, DEC-3, DEC-9).
+
+        The country list is cached on first call. Subsequent calls clear and
+        re-populate the combo so successive dialog opens are idempotent. On
+        failure (e.g. openpyxl missing or template file missing), the combo
+        is populated with only the sentinel placeholder — DEC-12's validator
+        will block any later attempt to use the master-data feature.
+        """
+        if not hasattr(self, "_country_list_cache"):
+            try:
+                template = os.path.join(
+                    self.plugin_dir, "templates", "farms_master_data_template.xlsx"
+                )
+                self._country_list_cache = _read_country_list_from_template(template)
+            except Exception as e:
+                self._log(f"Failed to load country list from template: {e}")
+                self._country_list_cache = []
+
+        self.dlg.countryCombo.clear()
+        self.dlg.countryCombo.addItem(_COUNTRY_COMBO_PLACEHOLDER)
+        self.dlg.countryCombo.addItems(self._country_list_cache)
 
     def _populate_field_combos(self):
         """Populate NodeID and PlotID field comboboxes from selected layer."""
@@ -763,6 +1061,27 @@ class TractGeolocationFormatter:
             self._log(f"Shapely boundary self-intersection check failed: {e}")
             return False
 
+    def _find_boundary_self_intersection_points(self, geom: QgsGeometry) -> list[tuple[float, float]]:
+        """
+        Return the deduped (within 1e-6) list of ``(lon, lat)`` boundary
+        self-intersection points for ``geom``. Empty list if the boundary is
+        simple, the geometry is empty, or any Shapely failure occurs.
+
+        Thin wrapper that converts the QgsGeometry to a Shapely shape and
+        delegates to the pure-Python module-level helper
+        ``_find_self_intersection_points_in_shape``. See GH-7 / DEC-8.
+        """
+        if geom is None or geom.isEmpty():
+            return []
+
+        try:
+            geojson_dict = json.loads(geom.asJson())
+            sg = shape(geojson_dict)
+            return _find_self_intersection_points_in_shape(sg)
+        except Exception as e:
+            self._log(f"Shapely self-intersection point finder failed: {e}")
+            return []
+
     def _get_tract_geometry_errors(self, geom: QgsGeometry) -> list[str]:
         """
         Final TRACT-aligned geometry checks. (updated March 2025)
@@ -784,7 +1103,8 @@ class TractGeolocationFormatter:
             errors.append("One or more rings have fewer than three unique coordinates.")
 
         if self._has_boundary_self_intersections(geom):
-            errors.append("Boundary has self-intersections")
+            points = self._find_boundary_self_intersection_points(geom)
+            errors.append(_format_self_intersection_message(points))
 
         return errors
 
@@ -864,6 +1184,9 @@ class TractGeolocationFormatter:
         
         # Track validations to reflect in csv report
         validation_rows = []
+        # GH-6: ordered set via dict keys (CPython 3.7+) — collects unique NodeIDs
+        # as features are processed, feeding the optional Master Data XLSX writer.
+        unique_node_ids = {}
 
         # Validate selected layer
         idx = self.dlg.layerComboBox.currentIndex()
@@ -999,6 +1322,23 @@ class TractGeolocationFormatter:
                 "suffix": self.dlg.plotBuildSuffixLineEdit.text().strip(),
                 "separator": self.dlg.plotBuildSepLineEdit.text() or "_",
             }
+
+        # Master Data options (GH-6) — opt-in checkbox + type + country (DEC-11, DEC-12)
+        generate_master_data = self.dlg.masterDataCheckBox.isChecked()
+        master_data_type = None
+        master_data_country = None
+        if generate_master_data:
+            master_data_type = (
+                "farms" if self.dlg.farmsTypeRadio.isChecked() else "farmer_groups"
+            )
+            if self.dlg.countryCombo.currentIndex() <= 0:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    self.tr("TRACT Geolocation Formatter"),
+                    self.tr("Please select a country for the Master Data file."),
+                )
+                return
+            master_data_country = self.dlg.countryCombo.currentText()
 
         # Output path
         output_path = self.dlg.outputPathLineEdit.text().strip()
@@ -1559,6 +1899,13 @@ class TractGeolocationFormatter:
                 else:
                     new_feat["NodeID"] = f"{node_prefix}{written_count + 1}"
 
+                # GH-6: accumulate unique NodeIDs for the optional Master Data writer.
+                # Only runs when the checkbox was checked — small perf optimization.
+                if generate_master_data:
+                    _node_id_value = new_feat["NodeID"]
+                    if _node_id_value:
+                        unique_node_ids.setdefault(_node_id_value, None)
+
                 # PlotID
                 if plot_none:
                     new_feat["PlotID"] = ""
@@ -1822,6 +2169,45 @@ class TractGeolocationFormatter:
         if report_path:
             summary_lines.append(self.tr(""))
             summary_lines.append(self.tr("Validation report written to: {}").format(report_path))
+
+        # GH-6: optional Master Data XLSX write — runs after GeoJSON + CSV report
+        # are produced. Failure here surfaces as a warning but does NOT mark the
+        # whole export as failed (the primary outputs are already on disk).
+        if generate_master_data and unique_node_ids:
+            template_filename = (
+                "farms_master_data_template.xlsx"
+                if master_data_type == "farms"
+                else "farmer_group_master_data_template.xlsx"
+            )
+            template_path = os.path.join(
+                self.plugin_dir, "templates", template_filename
+            )
+            master_data_output = _master_data_output_path(output_path, master_data_type)
+            try:
+                _write_master_data_xlsx(
+                    template_path,
+                    master_data_output,
+                    master_data_type,
+                    master_data_country,
+                    list(unique_node_ids.keys()),
+                )
+                self._log(
+                    self.tr("Master Data file written: {}").format(master_data_output)
+                )
+                summary_lines.append(self.tr(""))
+                summary_lines.append(
+                    self.tr("Master Data file written to: {}").format(master_data_output)
+                )
+            except Exception as e:
+                self._log(self.tr("Master Data write failed: {}").format(e))
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    self.tr("TRACT Geolocation Formatter"),
+                    self.tr("The Master Data file could not be written: {}").format(e),
+                )
+        elif generate_master_data and not unique_node_ids:
+            # DEC-13 defensive case — should not occur in practice (NodeID is compulsory).
+            self._log("No unique NodeIDs to write; master data file not produced.")
 
         # Rebuilds summary text
         summary_text = "\n".join(summary_lines)

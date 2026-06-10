@@ -7,13 +7,34 @@
     <x>0</x>
     <y>0</y>
     <width>520</width>
-    <height>600</height>
+    <height>500</height>
    </rect>
+  </property>
+  <property name="minimumSize">
+   <size>
+    <width>520</width>
+    <height>200</height>
+   </size>
   </property>
   <property name="windowTitle">
    <string>TRACT Geolocation Formatter</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
+
+   <!-- Scroll area wrapping all group boxes (so OK/Cancel stay reachable on small screens — GH-5) -->
+   <item>
+    <widget class="QScrollArea" name="scrollArea">
+     <property name="widgetResizable">
+      <bool>true</bool>
+     </property>
+     <property name="verticalScrollBarPolicy">
+      <enum>Qt::ScrollBarAsNeeded</enum>
+     </property>
+     <property name="horizontalScrollBarPolicy">
+      <enum>Qt::ScrollBarAlwaysOff</enum>
+     </property>
+     <widget class="QWidget" name="scrollAreaContents">
+      <layout class="QVBoxLayout" name="scrollContentLayout">
 
    <!-- Input layer group -->
    <item>
@@ -370,6 +391,68 @@
     </widget>
    </item>
 
+   <!-- Master Data group (GH-6) -->
+   <item>
+    <widget class="QGroupBox" name="masterDataGroupBox">
+     <property name="title">
+      <string>Master Data (optional)</string>
+     </property>
+     <layout class="QVBoxLayout" name="masterDataLayout">
+
+      <item>
+       <widget class="QCheckBox" name="masterDataCheckBox">
+        <property name="text">
+         <string>Generate Master Data file</string>
+        </property>
+       </widget>
+      </item>
+
+      <item>
+       <widget class="QWidget" name="masterDataContainer">
+        <layout class="QVBoxLayout" name="masterDataContainerLayout">
+
+         <item>
+          <widget class="QRadioButton" name="farmsTypeRadio">
+           <property name="text">
+            <string>Farms</string>
+           </property>
+           <property name="checked">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+
+         <item>
+          <widget class="QRadioButton" name="farmerGroupsTypeRadio">
+           <property name="text">
+            <string>Farmer Groups</string>
+           </property>
+          </widget>
+         </item>
+
+         <item>
+          <layout class="QHBoxLayout" name="countryLayout">
+           <item>
+            <widget class="QLabel" name="countryLabel">
+             <property name="text">
+              <string>Country:</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="countryCombo"/>
+           </item>
+          </layout>
+         </item>
+
+        </layout>
+       </widget>
+      </item>
+
+     </layout>
+    </widget>
+   </item>
+
    <!-- Output group -->
    <item>
     <widget class="QGroupBox" name="outputGroupBox">
@@ -415,6 +498,12 @@
      </layout>
     </widget>
    </item>
+
+      </layout>
+     </widget>
+    </widget>
+   </item>
+   <!-- End scroll area; button_box stays outside so it's always reachable (GH-5) -->
 
    <!-- Dialog buttons -->
    <item>
