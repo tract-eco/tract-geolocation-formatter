@@ -46,6 +46,7 @@ The plugin works directly on existing QGIS layers and does **not** require advan
 - Detect and flag common geometry issues before export
 - Export ready-to-upload GeoJSON files for the TRACT platform
 - Optionally generate a populated **Master Data XLSX** file (Farms or Farmer Groups) alongside the GeoJSON, with one row per unique NodeID and a user-selected country — ready for TRACT ingestion without manual template filling
+- Optionally **split the clean GeoJSON output into 2–10 smaller files** so large datasets upload to TRACT under its size limit — features sharing a NodeID always stay together in one file, and feature counts are balanced across files
 - Scrollable dialog so OK / Cancel buttons stay reachable on small / laptop screens
 - Compatible with both **QGIS 3.x** and **QGIS 4** from a single codebase
 - Works with common GIS formats (GeoJSON, Shapefile, GeoPackage)
@@ -59,7 +60,7 @@ Designed to be:
 
 ## Output Files
 
-The plugin produces up to three outputs (the third is opt-in):
+The plugin produces up to three outputs (the third is opt-in); a fourth option splits the first output into several files:
 
 1. GeoJSON file structured according to the TRACT geolocation template
 
@@ -99,11 +100,28 @@ The user picks:
 
 The plugin populates one row per unique NodeID, with the name and reference fields both set to the NodeID, leaving all other template columns untouched. The output preserves the complete TRACT template structure — all sheets, branding, headers, and validation rules — so it can be uploaded to TRACT without any further manual editing.
 
+### Split output (optional)
+
+When "Split clean output into multiple files" is enabled, the plugin divides the clean GeoJSON into **2–10** smaller sibling files so each one uploads to TRACT under its size limit. Files are named by inserting a hyphen-index before the extension:
+
+```
+plots.geojson  →  plots-1.geojson, plots-2.geojson, plots-3.geojson
+```
+
+Splitting guarantees:
+
+- **NodeIDs are never divided** — every feature sharing a NodeID stays together in exactly one file (an indivisible group).
+- **Balanced sizes** — feature counts are balanced across the files (subject to the NodeID constraint) so the files are of similar size.
+- **Faithful subsets** — each split file is an exact byte-subset of the combined output (same header, CRS, and coordinates); together they contain every feature exactly once.
+
+You cannot request more files than there are unique NodeIDs — a NodeID cannot be split across files. If you do, the plugin shows an error stating the maximum and leaves the combined output untouched so you can reduce the count and run again. On a successful split, the combined file is replaced by the split files, which are each auto-loaded into QGIS. The Master Data XLSX and validation report are always single files and are unaffected by splitting.
+
 
 ## Typical Use Cases
 
 - Preparing plot boundaries for ingestion into the TRACT platform
 - Producing a matched pair of geolocation GeoJSON + Master Data XLSX for one-step TRACT upload
+- Splitting a large geolocation dataset into several smaller files so each uploads to TRACT under its size limit
 - Adapting customer-provided geolocation data to the TRACT GeoJSON template
 - Validating and cleaning polygons prior to deforestation analysis
 - Pre-checking geolocation data for EUDR-related due diligence workflows

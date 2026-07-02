@@ -481,6 +481,44 @@
     </widget>
    </item>
 
+   <!-- Split group -->
+   <item>
+    <widget class="QGroupBox" name="splitGroupBox">
+     <property name="title">
+      <string>Split output (optional)</string>
+     </property>
+     <layout class="QVBoxLayout" name="splitLayout">
+      <item>
+       <widget class="QCheckBox" name="splitCheckBox">
+        <property name="text">
+         <string>Split clean output into multiple files</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QWidget" name="splitContainer">
+        <layout class="QHBoxLayout" name="splitContainerLayout">
+         <item>
+          <widget class="QLabel" name="splitCountLabel">
+           <property name="text">
+            <string>Number of files:</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QSpinBox" name="splitCountSpin">
+           <property name="minimum"><number>2</number></property>
+           <property name="maximum"><number>10</number></property>
+           <property name="value"><number>2</number></property>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+
    <!-- Description group -->
    <item>
     <widget class="QGroupBox" name="logGroupBox">

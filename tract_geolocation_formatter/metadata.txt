@@ -3,7 +3,7 @@ name=TRACT Geolocation Formatter
 qgisMinimumVersion=3.0
 qgisMaximumVersion=4.99
 description=Validate, clean, and convert geolocation layers into the TRACT GeoJSON template for sustainability and traceability workflows.
-version=0.3.0
+version=0.4.0
 author=Luis Carrasco
 email=luiscartor@gmail.com
 
@@ -17,6 +17,12 @@ homepage=https://github.com/tract-eco/tract-geolocation-formatter
 hasProcessingProvider=no
 
 changelog=
+    0.4.0
+    - Optional: split the clean GeoJSON output into 2–10 files so large datasets
+      upload to TRACT under the size limit. Features sharing a NodeID always stay in
+      the same file; feature counts are balanced across files. You cannot request
+      more files than there are unique NodeIDs (you'll get an error if you try). On a
+      successful split the combined file is replaced by the split files. (GH-8)
     0.3.0
     - Compatible with QGIS 4 (Qt6/PyQt6) and QGIS 3.x (Qt5/PyQt5) from a single codebase (GH-4)
     - Dialog UI now loaded at runtime from .ui (no generated form file shipped) (GH-4)

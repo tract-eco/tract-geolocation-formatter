@@ -275,6 +275,91 @@ def _master_data_output_path(geojson_path, master_data_type):
     return f"{base}_master_data_{master_data_type}.xlsx"
 
 
+def _split_output_path(output_path, index):
+    """Insert '-{index}' before the extension.
+
+    /data/plots.geojson, 2 -> /data/plots-2.geojson
+    """
+    base, ext = os.path.splitext(output_path)
+    return f"{base}-{index}{ext}"
+
+
+def _partition_node_ids(node_id_counts, num_files):
+    """Partition NodeID groups into num_files bins, balancing feature counts.
+
+    node_id_counts: mapping {node_id: feature_count}.
+    Returns: list of num_files lists of node_ids.
+
+    Greedy longest-processing-time: sort groups by (count desc, node_id asc),
+    assign each to the currently-emptiest bin (ties -> lowest index).
+    Deterministic. Caller must ensure 1 <= num_files <= len(node_id_counts).
+    """
+    order = sorted(node_id_counts, key=lambda k: (-node_id_counts[k], k))
+    bins = [[] for _ in range(num_files)]
+    loads = [0] * num_files
+    for key in order:
+        j = min(range(num_files), key=lambda i: (loads[i], i))
+        bins[j].append(key)
+        loads[j] += node_id_counts[key]
+    return bins
+
+
+def _split_geojson_by_node_id(geojson_path, num_files):
+    """Split a written GeoJSON FeatureCollection into exactly num_files siblings.
+
+    Groups features by properties.NodeID (missing/None -> ""), never splitting a
+    group across files, balancing feature counts. Preserves the collection header
+    and original feature order. Returns a list of (path, feature_count).
+
+    Raises ValueError if num_files exceeds the number of unique NodeIDs (a NodeID
+    cannot be divided across files) — the caller turns this into a user-facing
+    error and leaves the full output in place.
+    """
+    with open(geojson_path, encoding="utf-8") as fh:
+        fc = json.load(fh)
+
+    features = fc.get("features", []) or []
+    # Preserve original order; record each feature's group key.
+    keyed = []
+    counts = {}
+    for feat in features:
+        props = feat.get("properties") or {}
+        nid = props.get("NodeID")
+        key = "" if nid is None else str(nid)
+        keyed.append((key, feat))
+        counts[key] = counts.get(key, 0) + 1
+
+    unique = len(counts)
+    if num_files > unique:
+        raise ValueError(
+            "You requested {0} files, but the dataset has only {1} unique "
+            "NodeID(s). A NodeID cannot be split across files, so at most {1} "
+            "file(s) can be produced. Reduce the number of files and run again."
+            .format(num_files, unique)
+        )
+
+    bins = _partition_node_ids(counts, num_files)
+
+    key_to_bin = {}
+    for bin_idx, keys in enumerate(bins):
+        for key in keys:
+            key_to_bin[key] = bin_idx
+
+    buckets = [[] for _ in range(num_files)]
+    for key, feat in keyed:          # original order preserved
+        buckets[key_to_bin[key]].append(feat)
+
+    written = []
+    for i, bucket in enumerate(buckets, start=1):
+        out_path = _split_output_path(geojson_path, i)
+        out_fc = {k: v for k, v in fc.items() if k != "features"}
+        out_fc["features"] = bucket
+        with open(out_path, "w", encoding="utf-8") as fh:
+            json.dump(out_fc, fh)
+        written.append((out_path, len(bucket)))
+    return written
+
+
 def _read_country_list_from_template(template_path):
     """Load TRACT's country list from one of the bundled XLSX templates.
 
@@ -497,6 +582,8 @@ class TractGeolocationFormatter:
             self.dlg.plotBuildRadio.toggled.connect(self._update_plotid_ui_state)
             # Connect Master Data checkbox (GH-6)
             self.dlg.masterDataCheckBox.toggled.connect(self._update_master_data_ui_state)
+            # Connect Split-output checkbox (GH-8)
+            self.dlg.splitCheckBox.toggled.connect(self._update_split_ui_state)
 
         # Populate dialog every time (layers, fields, defaults)
         self._populate_dialog()
@@ -582,10 +669,15 @@ class TractGeolocationFormatter:
         self._populate_country_combo()
         self.dlg.countryCombo.setCurrentIndex(0)
 
+        # Split-output defaults (GH-8) — off, 2 files.
+        self.dlg.splitCheckBox.setChecked(False)
+        self.dlg.splitCountSpin.setValue(2)
+
         # Enable/disable state is refreshed when dialog opens
         self._update_nodeid_ui_state()
         self._update_plotid_ui_state()
         self._update_master_data_ui_state()
+        self._update_split_ui_state()
 
     def _update_nodeid_ui_state(self):
         """Enable only the relevant NodeID input widget."""
@@ -603,6 +695,10 @@ class TractGeolocationFormatter:
     def _update_master_data_ui_state(self):
         """Show/hide master-data sub-controls based on the checkbox state (GH-6)."""
         self.dlg.masterDataContainer.setVisible(self.dlg.masterDataCheckBox.isChecked())
+
+    def _update_split_ui_state(self):
+        """Enable the split controls only when the checkbox is ticked (GH-8)."""
+        self.dlg.splitContainer.setEnabled(self.dlg.splitCheckBox.isChecked())
 
     def _populate_country_combo(self):
         """Populate the country dropdown from the bundled TRACT template (GH-6, DEC-3, DEC-9).
@@ -1339,6 +1435,10 @@ class TractGeolocationFormatter:
                 )
                 return
             master_data_country = self.dlg.countryCombo.currentText()
+
+        # Split-output options (GH-8) — opt-in checkbox + file count.
+        split_enabled = self.dlg.splitCheckBox.isChecked()
+        split_count = self.dlg.splitCountSpin.value()
 
         # Output path
         output_path = self.dlg.outputPathLineEdit.text().strip()
@@ -2208,6 +2308,63 @@ class TractGeolocationFormatter:
         elif generate_master_data and not unique_node_ids:
             # DEC-13 defensive case — should not occur in practice (NodeID is compulsory).
             self._log("No unique NodeIDs to write; master data file not produced.")
+
+        # GH-8: optional split of the clean output into N sibling files.
+        if split_enabled:
+            try:
+                split_files = _split_geojson_by_node_id(output_path, split_count)
+            except ValueError as e:
+                # DEC-15: requested more files than unique NodeIDs. Full output is kept.
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    self.tr("TRACT Geolocation Formatter"),
+                    str(e),
+                )
+            except Exception as e:
+                self._log(self.tr("Split failed: {}").format(e))
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    self.tr("TRACT Geolocation Formatter"),
+                    self.tr("The output could not be split: {}").format(e),
+                )
+            else:
+                # Success: load each split file as its own layer (§3.6).
+                summary_lines.append(self.tr(""))
+                summary_lines.append(self.tr("Split output files:"))
+                for path, count in split_files:
+                    summary_lines.append(
+                        self.tr("  {0}  ({1} features)").format(path, count)
+                    )
+                    split_layer = QgsVectorLayer(path, os.path.basename(path), "ogr")
+                    if split_layer.isValid():
+                        QgsProject.instance().addMapLayer(split_layer)
+                    else:
+                        self.iface.messageBar().pushMessage(
+                            "TRACT Geolocation Formatter",
+                            f"Split file created but could not be loaded: {path}",
+                            level=Qgis.Warning,
+                            duration=5,
+                        )
+
+                # DEC-14: remove the full output now that the split files exist.
+                # output_layer was created for the full file earlier in this method.
+                try:
+                    if output_layer is not None and output_layer.isValid():
+                        QgsProject.instance().removeMapLayer(output_layer.id())
+                except Exception:
+                    pass
+                try:
+                    os.remove(output_path)
+                    summary_lines.append(self.tr(""))
+                    summary_lines.append(
+                        self.tr("Full output split into {0} files and removed: {1}")
+                        .format(len(split_files), output_path)
+                    )
+                except OSError as e:
+                    self._log(
+                        self.tr("Could not delete full output {0}: {1}")
+                        .format(output_path, e)
+                    )
 
         # Rebuilds summary text
         summary_text = "\n".join(summary_lines)
