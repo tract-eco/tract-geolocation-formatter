@@ -70,7 +70,7 @@ except (ImportError, AttributeError):
 from .TRACT_Geolocation_Formatter_dialog import TractGeolocationFormatterDialog
 
 # Constants for Minimum Area Checks
-MIN_PLOT_AREA_HA = 0.05
+MIN_PLOT_AREA_HA = 0.001
 AREA_CRS = QgsCoordinateReferenceSystem("EPSG:6933")  # Equal-area CRS
 COORD_DECIMALS = 6
 

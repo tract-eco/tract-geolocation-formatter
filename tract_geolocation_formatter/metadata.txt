@@ -23,6 +23,8 @@ changelog=
       the same file; feature counts are balanced across files. You cannot request
       more files than there are unique NodeIDs (you'll get an error if you try). On a
       successful split the combined file is replaced by the split files. (GH-8)
+    - Lowered the minimum plot area threshold from 0.05 ha to 0.001 ha to
+      harmonize with TRACT's platform validation.
     0.3.0
     - Compatible with QGIS 4 (Qt6/PyQt6) and QGIS 3.x (Qt5/PyQt5) from a single codebase (GH-4)
     - Dialog UI now loaded at runtime from .ui (no generated form file shipped) (GH-4)
