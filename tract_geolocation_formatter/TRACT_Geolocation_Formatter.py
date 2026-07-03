@@ -2224,20 +2224,50 @@ class TractGeolocationFormatter:
             self.tr("Features with geometry repairs applied: {}").format(len(repair_log))
             )
 
+            # GH-9: inside the geometry repair details, the two most common, safe
+            # auto-fixes — coordinate rounding and Z-value removal — are summarized
+            # as feature counts instead of one line per feature. All other repairs
+            # are still listed per feature. The full per-feature log always remains
+            # in the CSV report.
+            round_msg = f"Rounded coordinates to {COORD_DECIMALS} decimals"
+            summarized_counts = {
+                round_msg: 0,
+                "Removed Z values": 0,
+            }
+            detailed = {}  # { feature_id : [ per-feature repair messages ] }
+            for fid, messages in repair_log.items():
+                for msg in messages:
+                    if msg in summarized_counts:
+                        summarized_counts[msg] += 1
+                    else:
+                        detailed.setdefault(fid, []).append(msg)
+
             summary_lines.append("")
             summary_lines.append(self.tr("Geometry repair details:"))
 
+            if summarized_counts[round_msg]:
+                summary_lines.append(
+                    self.tr("  Coordinates rounded to {0} decimals for {1} features")
+                    .format(COORD_DECIMALS, summarized_counts[round_msg])
+                )
+            if summarized_counts["Removed Z values"]:
+                summary_lines.append(
+                    self.tr("  Z values removed from {} features")
+                    .format(summarized_counts["Removed Z values"])
+                )
+
+            # All other repairs (duplicate vertices, makeValid, failed repairs)
+            # remain listed per feature.
             max_display = 100
-            display_ids = list(repair_log.keys())[:max_display]
+            display_ids = list(detailed.keys())[:max_display]
 
             for fid in display_ids:
-                messages = repair_log[fid]
-                for msg in messages:
+                for msg in detailed[fid]:
                     summary_lines.append(f"  - {_feature_label(fid)}: {msg}")
 
-            if len(repair_log) > max_display:
+            if len(detailed) > max_display:
                 summary_lines.append(
-                    f"  ... and {len(repair_log) - max_display} more features with repairs."
+                    f"  ... and {len(detailed) - max_display} more features with repairs."
                 )
 
 
