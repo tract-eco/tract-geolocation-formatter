@@ -230,9 +230,16 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self._body().decode("utf-8") or "{}")
         except ValueError:
             return self._error(400, "BadRequest", "Body must be JSON.")
-        filenames = payload.get("filenames") or []
+        # Real TRACT wraps the request in a "data" envelope:
+        #   {"data": {"filenames": [...]}}  -> 422 if "data" is missing.
+        body_data = payload.get("data")
+        if not isinstance(body_data, dict):
+            return self._error(422, "Unprocessable entity",
+                               "[{'type': 'missing', 'loc': ('body', 'data'), "
+                               "'msg': 'Field required'}]")
+        filenames = body_data.get("filenames") or []
         if not filenames:
-            return self._error(400, "FileBatchEmptyError", "No filenames supplied.")
+            return self._error(422, "Unprocessable entity", "Missing data.filenames.")
 
         shape = self._shape(query)
         data = []

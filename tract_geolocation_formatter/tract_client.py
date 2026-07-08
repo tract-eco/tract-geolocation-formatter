@@ -96,6 +96,38 @@ def resolve_transfer(url, base_url):
     )
 
 
+def _response_detail(resp, limit=800):
+    """A short, human-readable snippet of a response body for error messages.
+
+    Returns '' when there is no body. This is what turns an opaque
+    'Unexpected response (422)' into '(422) Server said: {"product": "required"}'.
+    """
+    if resp is None or not resp.content:
+        return ""
+    try:
+        text = resp.content.decode("utf-8", "replace").strip()
+    except Exception:
+        return ""
+    if not text:
+        return ""
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return " Server said: {0}".format(text)
+
+
+def _keycloak_error_detail(resp):
+    """Extract Keycloak's error / error_description for a clearer auth message."""
+    try:
+        payload = resp.json()
+        parts = [payload.get("error"), payload.get("error_description")]
+        detail = " - ".join(p for p in parts if p)
+        if detail:
+            return ": " + detail
+    except Exception:
+        pass
+    return _response_detail(resp)
+
+
 # ---------------------------------------------------------------------------
 # Data holders — map the camelCase API fields into stable snake_case attrs.
 # ---------------------------------------------------------------------------
@@ -304,13 +336,15 @@ class KeycloakTokenProvider:
             )
         if resp.status == 401 or resp.status == 400:
             raise TractAuthError(
-                "Keycloak rejected the client credentials ({0}). Check the client "
-                "id and secret in TRACT Connection Settings.".format(resp.status),
+                "Keycloak rejected the client credentials ({0}){1}. Check the client "
+                "id and secret in TRACT Connection Settings.".format(
+                    resp.status, _keycloak_error_detail(resp)),
                 status=resp.status,
             )
         if resp.status != 200:
             raise TractAuthError(
-                "Unexpected Keycloak response ({0}).".format(resp.status),
+                "Unexpected Keycloak response ({0}).{1}".format(
+                    resp.status, _response_detail(resp)),
                 status=resp.status,
             )
 
@@ -394,7 +428,10 @@ class _BaseTractClient(TractClient):
                 "Could not reach TRACT ({0}): {1}".format(path, resp.error)
             )
         if resp.status == 401:
-            raise TractAuthError("TRACT rejected the token (401).", status=401)
+            raise TractAuthError(
+                "TRACT rejected the token (401).{0}".format(_response_detail(resp)),
+                status=401,
+            )
         return resp
 
     @staticmethod
@@ -417,23 +454,38 @@ class _BaseTractClient(TractClient):
 
     # -- send ---------------------------------------------------------------
     def create_upload(self, filename):
-        body = json.dumps({"filenames": [filename]}).encode("utf-8")
+        # TRACT wraps the request in a "data" envelope: {"data": {"filenames": [...]}}.
+        body = json.dumps({"data": {"filenames": [filename]}}).encode("utf-8")
         resp = self._call_api(
             "POST", "/v3/files/data-uploads", body,
             headers={"Content-Type": "application/json"},
         )
         if resp.status not in (200, 201):
             raise TractTransportError(
-                "Unexpected response minting upload ({0}).".format(resp.status),
+                "Unexpected response minting upload ({0}).{1}".format(
+                    resp.status, _response_detail(resp)),
                 status=resp.status,
             )
-        data = (resp.json().get("data") or [])
-        if not data:
-            raise TractTransportError("Upload mint returned no data.")
-        el = data[0]
+        # Response "data" may be a list (batch) or a single object; field names
+        # are matched tolerantly (snake_case or camelCase) pending real-API confirm.
+        items = resp.json().get("data")
+        if isinstance(items, list):
+            el = items[0] if items else None
+        elif isinstance(items, dict):
+            el = items
+        else:
+            el = None
+        if not el:
+            raise TractTransportError(
+                "Upload mint returned no data.{0}".format(_response_detail(resp)))
+        file_id = el.get("file_id") or el.get("fileId") or el.get("id")
+        transfer_url = el.get("url") or el.get("signedUrl") or el.get("uploadUrl")
+        if not transfer_url:
+            raise TractTransportError(
+                "Upload mint response had no transfer URL.{0}".format(_response_detail(resp)))
         return UploadTicket(
-            file_id=el.get("file_id"),
-            transfer_url=el.get("url"),
+            file_id=file_id,
+            transfer_url=transfer_url,
             bucket_type=el.get("bucket_type", self.bucket_type),
         )
 
@@ -447,7 +499,8 @@ class _BaseTractClient(TractClient):
             raise TractTransportError("Upload transfer failed: {0}".format(resp.error))
         if resp.status is None or resp.status >= 400:
             raise TractTransportError(
-                "Upload transfer rejected ({0}).".format(resp.status),
+                "Upload transfer rejected ({0}).{1}".format(
+                    resp.status, _response_detail(resp)),
                 status=resp.status,
             )
 
@@ -456,7 +509,8 @@ class _BaseTractClient(TractClient):
         resp = self._call_api("GET", "/v3/files/statuses?" + query)
         if resp.status != 200:
             raise TractTransportError(
-                "Unexpected status response ({0}).".format(resp.status),
+                "Unexpected status response ({0}).{1}".format(
+                    resp.status, _response_detail(resp)),
                 status=resp.status,
             )
         data = resp.json().get("data") or []
@@ -484,12 +538,14 @@ class _BaseTractClient(TractClient):
         if resp.status == 400:
             # FileBucketUnresolvedError — bucket_type is hardcoded, so this is a bug.
             raise TractError(
-                "TRACT could not resolve bucket_type {0!r} (400).".format(bucket_type),
+                "TRACT could not resolve bucket_type {0!r} (400).{1}".format(
+                    bucket_type, _response_detail(resp)),
                 status=400,
             )
         if resp.status != 200:
             raise TractTransportError(
-                "Unexpected signed-url response ({0}).".format(resp.status),
+                "Unexpected signed-url response ({0}).{1}".format(
+                    resp.status, _response_detail(resp)),
                 status=resp.status,
             )
         data = resp.json().get("data") or []
@@ -510,7 +566,8 @@ class _BaseTractClient(TractClient):
             raise TractNotFoundError("The requested file could not be fetched (404).", status=404)
         if resp.status is None or resp.status >= 400:
             raise TractTransportError(
-                "Download transfer failed ({0}).".format(resp.status),
+                "Download transfer failed ({0}).{1}".format(
+                    resp.status, _response_detail(resp)),
                 status=resp.status,
             )
         return resp.content

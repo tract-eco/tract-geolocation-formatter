@@ -33,6 +33,7 @@ from qgis.PyQt.QtWidgets import (
     QAction,
     QMessageBox,
     QFileDialog,
+    QInputDialog,
     QDialog,
     QVBoxLayout,
     QLabel,
@@ -55,7 +56,8 @@ from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     Qgis,
-    QgsVectorLayer
+    QgsVectorLayer,
+    QgsApplication
 )
 
 # Version-safe string field type for QgsField construction.
@@ -458,6 +460,11 @@ class TractGeolocationFormatter:
         # Check if plugin was started the first time in current QGIS session
         self.first_start = True
 
+        # SPEC-tract-integration: last written GeoJSON (default for Send) and a
+        # reference to the running background task (so it is not garbage-collected).
+        self._last_output_path = None
+        self._active_task = None
+
         self.dlg = None
         self._polygon_layers = []
 
@@ -553,12 +560,374 @@ class TractGeolocationFormatter:
             callback=self.run,
             parent=self.iface.mainWindow(),
         )
+        # GH / SPEC-tract-integration: connection settings (menu only, no toolbar icon).
+        self.add_action(
+            icon_path,
+            text=self.tr('TRACT Connection Settings…'),
+            callback=self._open_tract_connection_settings,
+            add_to_toolbar=False,
+            parent=self.iface.mainWindow(),
+        )
+        # SPEC-tract-integration: send / receive GeoJSON to/from TRACT (menu only).
+        self.add_action(
+            icon_path,
+            text=self.tr('Send to TRACT…'),
+            callback=self._send_to_tract,
+            add_to_toolbar=False,
+            parent=self.iface.mainWindow(),
+        )
+        self.add_action(
+            icon_path,
+            text=self.tr('Receive from TRACT…'),
+            callback=self._receive_from_tract,
+            add_to_toolbar=False,
+            parent=self.iface.mainWindow(),
+        )
 
     def unload(self):
         """Removes the plugin menu item and icon from QGIS GUI."""
         for action in self.actions:
             self.iface.removePluginMenu(self.tr('&TRACT Geolocation Formatter'), action)
             self.iface.removeToolBarIcon(action)
+
+    def _open_tract_connection_settings(self):
+        """Open the TRACT connection & authentication settings dialog (WI-1)."""
+        from .tract_settings import TractConnectionDialog
+        dialog = TractConnectionDialog(self.iface.mainWindow())
+        dialog.exec()
+
+    def _tract_client_or_warn(self):
+        """Build a client from settings, or warn and return None if unconfigured."""
+        from .tract_settings import build_client_from_settings
+        client = build_client_from_settings()
+        if client is None:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                self.tr("TRACT Geolocation Formatter"),
+                self.tr("Configure the TRACT connection first "
+                        "(Plugins → TRACT Connection Settings…)."),
+            )
+        return client
+
+    # -- Send to TRACT (WI-2) ----------------------------------------------
+    def _send_to_tract(self):
+        """Menu action: pick a GeoJSON file, then upload it to TRACT (WI-2)."""
+        if self._tract_client_or_warn() is None:
+            return
+        default = ""
+        if self._last_output_path and os.path.exists(self._last_output_path):
+            default = self._last_output_path
+        path, _filter = QFileDialog.getOpenFileName(
+            self.iface.mainWindow(),
+            self.tr("Select GeoJSON to send to TRACT"),
+            default,
+            "GeoJSON (*.geojson *.json)",
+        )
+        if not path:
+            return
+        self._send_files_to_tract([path])
+
+    def _send_files_to_tract(self, paths):
+        """Upload one or more GeoJSON files to TRACT off the UI thread (WI-2).
+
+        Shared by the menu action (single file) and the "Send to TRACT" button on
+        the export report (which sends the split files when splitting was used).
+        """
+        from .tract_tasks import UploadTask
+
+        client = self._tract_client_or_warn()
+        if client is None:
+            return
+
+        files = []
+        for path in paths:
+            try:
+                with open(path, "rb") as fh:
+                    files.append((os.path.basename(path), fh.read()))
+            except OSError as e:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    self.tr("TRACT Geolocation Formatter"),
+                    self.tr("Could not read {0}: {1}").format(path, e),
+                )
+                return
+        if not files:
+            return
+
+        task = UploadTask(client, files, on_finished=self._on_upload_finished)
+        self._active_task = task
+        label = files[0][0] if len(files) == 1 else self.tr("{0} files").format(len(files))
+        self.iface.messageBar().pushMessage(
+            "TRACT Geolocation Formatter",
+            self.tr("Uploading {0} to TRACT…").format(label),
+            level=Qgis.Info,
+            duration=3,
+        )
+        QgsApplication.taskManager().addTask(task)
+
+    def _on_upload_finished(self, task, result):
+        """Main-thread callback for UploadTask — report the outcome(s) (WI-2)."""
+        from .tract_tasks import UploadTask
+        self._active_task = None
+
+        if not result:
+            # Aborting failure (auth) or cancellation — run() returned False.
+            if task.fatal_error_kind == "TractAuthError":
+                message = self.tr("Upload failed — authentication rejected. Check "
+                                  "TRACT Connection Settings. ({0})").format(task.fatal_error)
+            elif task.fatal_error:
+                message = self.tr("Upload failed: {0}").format(task.fatal_error)
+            else:
+                message = self.tr("Upload cancelled.")
+            self.iface.messageBar().pushMessage(
+                "TRACT Geolocation Formatter", message, level=Qgis.Warning, duration=8)
+            return
+
+        results = task.results
+        completed = [r for r in results if r["outcome"] == UploadTask.OUTCOME_COMPLETED]
+        failed = [r for r in results if r["outcome"] == UploadTask.OUTCOME_VALIDATION_FAILED]
+        timed = [r for r in results if r["outcome"] == UploadTask.OUTCOME_TIMEOUT]
+        errored = [r for r in results if r["outcome"] == UploadTask.OUTCOME_ERROR]
+
+        # Log per-file detail (error reports, transport errors) for the record.
+        for r in failed:
+            if r.get("error_report_name"):
+                self._log(self.tr("TRACT validation failed for {0} — error report: {1}")
+                          .format(r["filename"], r["error_report_name"]))
+        for r in errored:
+            self._log(self.tr("Upload error for {0}: {1}").format(r["filename"], r.get("error")))
+
+        if len(results) == 1:
+            # Single-file: keep the detailed, familiar messages.
+            r = results[0]
+            if r["outcome"] == UploadTask.OUTCOME_COMPLETED:
+                self.iface.messageBar().pushMessage(
+                    "TRACT Geolocation Formatter",
+                    self.tr("{0} uploaded and validated by TRACT.").format(r["filename"]),
+                    level=Qgis.Success, duration=5)
+            elif r["outcome"] == UploadTask.OUTCOME_VALIDATION_FAILED:
+                detail = self.tr(" Error report: {0}").format(r["error_report_name"]) if r["error_report_name"] else ""
+                self.iface.messageBar().pushMessage(
+                    "TRACT Geolocation Formatter",
+                    self.tr("TRACT validation failed for {0}.{1}").format(r["filename"], detail),
+                    level=Qgis.Warning, duration=10)
+            elif r["outcome"] == UploadTask.OUTCOME_TIMEOUT:
+                self.iface.messageBar().pushMessage(
+                    "TRACT Geolocation Formatter",
+                    self.tr("{0} uploaded, but ingestion is still processing — check TRACT "
+                            "later for the final status.").format(r["filename"]),
+                    level=Qgis.Info, duration=8)
+            else:  # OUTCOME_ERROR
+                self.iface.messageBar().pushMessage(
+                    "TRACT Geolocation Formatter",
+                    self.tr("Upload failed for {0}: {1}").format(r["filename"], r.get("error")),
+                    level=Qgis.Warning, duration=10)
+            return
+
+        # Batch summary.
+        total = len(results)
+        parts = [self.tr("{0}/{1} uploaded").format(len(completed), total)]
+        if failed:
+            parts.append(self.tr("{0} failed validation").format(len(failed)))
+        if timed:
+            parts.append(self.tr("{0} still processing").format(len(timed)))
+        if errored:
+            parts.append(self.tr("{0} errored").format(len(errored)))
+        level = Qgis.Success if len(completed) == total else Qgis.Warning
+        self.iface.messageBar().pushMessage(
+            "TRACT Geolocation Formatter",
+            self.tr("TRACT upload: {0}. See the log for details.").format(", ".join(parts))
+            if (failed or timed or errored) else
+            self.tr("TRACT upload: {0}.").format(", ".join(parts)),
+            level=level, duration=8)
+
+    # -- Receive from TRACT (WI-3) -----------------------------------------
+    def _receive_from_tract(self):
+        """Download a GeoJSON from TRACT by full stored filename (WI-3)."""
+        from .tract_tasks import DownloadTask
+
+        client = self._tract_client_or_warn()
+        if client is None:
+            return
+
+        filename, ok = QInputDialog.getText(
+            self.iface.mainWindow(),
+            self.tr("Receive from TRACT"),
+            self.tr("Full stored filename, including its hash suffix\n"
+                    "(e.g. hungary_5f8010…bee9fb.geojson):"),
+        )
+        if not ok or not filename.strip():
+            return
+
+        task = DownloadTask(client, filename.strip(), on_finished=self._on_download_finished)
+        self._active_task = task
+        self.iface.messageBar().pushMessage(
+            "TRACT Geolocation Formatter",
+            self.tr("Downloading {0} from TRACT…").format(filename.strip()),
+            level=Qgis.Info,
+            duration=3,
+        )
+        QgsApplication.taskManager().addTask(task)
+
+    def _on_download_finished(self, task, result):
+        """Main-thread callback for DownloadTask — load layer or report error (WI-3)."""
+        self._active_task = None
+
+        if not result:
+            # Distinct messages per failure kind (spec §7) — never collapse into one.
+            if task.error_kind == "TractNotFoundError":
+                message = self.tr("No file named '{0}' was found. Check the filename, "
+                                  "including its hash suffix.").format(task.filename)
+            elif task.error_kind == "TractAuthError":
+                message = self.tr("Authentication failed — check TRACT Connection "
+                                  "Settings. ({0})").format(task.error)
+            else:
+                message = self.tr("Could not download from TRACT: {0}").format(task.error)
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                self.tr("TRACT Geolocation Formatter"),
+                message,
+            )
+            return
+
+        layer = self._geojson_bytes_to_memory_layer(task.data, os.path.basename(task.filename))
+        if layer is None or not layer.isValid():
+            self.iface.messageBar().pushMessage(
+                "TRACT Geolocation Formatter",
+                self.tr("Downloaded {0} but could not load it as a layer.").format(task.filename),
+                level=Qgis.Warning, duration=8)
+            return
+
+        QgsProject.instance().addMapLayer(layer)
+        self.iface.messageBar().pushMessage(
+            "TRACT Geolocation Formatter",
+            self.tr("Loaded {0} from TRACT ({1} features).").format(
+                task.filename, layer.featureCount()),
+            level=Qgis.Success, duration=5)
+
+    def _geojson_bytes_to_memory_layer(self, data, name):
+        """Build an editable in-memory EPSG:4326 layer from raw GeoJSON bytes.
+
+        Loads the bytes via OGR (from a temp file) and copies features into a
+        memory layer so the result is editable and not tied to a file (spec §7).
+        Returns None if the bytes are not a loadable vector layer.
+        """
+        import tempfile
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".geojson", delete=False)
+        try:
+            tmp.write(data)
+            tmp.close()
+            src = QgsVectorLayer(tmp.name, name, "ogr")
+            if not src.isValid():
+                return None
+            geom_token = QgsWkbTypes.displayString(src.wkbType())
+            mem = QgsVectorLayer("{0}?crs=EPSG:4326".format(geom_token), name, "memory")
+            provider = mem.dataProvider()
+            provider.addAttributes(src.fields().toList())
+            mem.updateFields()
+            provider.addFeatures(list(src.getFeatures()))
+            mem.updateExtents()
+            return mem
+        finally:
+            try:
+                os.remove(tmp.name)
+            except OSError:
+                pass
+
+    def _load_layer_from_tract(self):
+        """Dialog button: download a GeoJSON from TRACT and select it as the
+        input layer, so the user can go straight into the transform (WI-3).
+
+        Runs synchronously (with a wait cursor) because the modal dialog needs
+        the layer before the user continues; a single file download is quick.
+        """
+        from .tract_client import (
+            TRACT_DATA_FILES_BUCKET_TYPE,
+            TractAuthError,
+            TractError,
+            TractNotFoundError,
+        )
+        from .tract_settings import build_client_from_settings
+
+        client = build_client_from_settings()
+        if client is None:
+            QMessageBox.warning(
+                self.dlg,
+                self.tr("TRACT Geolocation Formatter"),
+                self.tr("Configure the TRACT connection first "
+                        "(Plugins → TRACT Connection Settings…)."),
+            )
+            return
+
+        filename, ok = QInputDialog.getText(
+            self.dlg,
+            self.tr("Load from TRACT"),
+            self.tr("Full stored filename, including its hash suffix\n"
+                    "(e.g. hungary_5f8010…bee9fb.geojson):"),
+        )
+        if not ok or not filename.strip():
+            return
+        filename = filename.strip()
+
+        error_msg = None
+        data = None
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            url = client.create_download(filename, TRACT_DATA_FILES_BUCKET_TYPE)
+            data = client.get_bytes(url)
+        except TractNotFoundError:
+            error_msg = self.tr("No file named '{0}' was found. Check the filename, "
+                                "including its hash suffix.").format(filename)
+        except TractAuthError as e:
+            error_msg = self.tr("Authentication failed — check TRACT Connection "
+                                "Settings. ({0})").format(e)
+        except TractError as e:
+            error_msg = self.tr("Could not download from TRACT: {0}").format(e)
+        except Exception as e:  # defensive
+            error_msg = self.tr("Could not download from TRACT: {0}").format(e)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if error_msg:
+            QMessageBox.warning(self.dlg, self.tr("TRACT Geolocation Formatter"), error_msg)
+            return
+
+        layer = self._geojson_bytes_to_memory_layer(data, os.path.basename(filename))
+        if layer is None or not layer.isValid():
+            QMessageBox.warning(
+                self.dlg,
+                self.tr("TRACT Geolocation Formatter"),
+                self.tr("Downloaded {0} but could not load it as a layer.").format(filename),
+            )
+            return
+
+        QgsProject.instance().addMapLayer(layer)
+
+        # Re-scan polygon layers so the new one appears, then select it. Block
+        # signals during the rebuild, then set the index once to fire the field
+        # refresh (_on_layer_changed) a single time.
+        self._polygon_layers = self._polygon_vector_layers()
+        self.dlg.layerComboBox.blockSignals(True)
+        self.dlg.layerComboBox.clear()
+        for lyr in self._polygon_layers:
+            self.dlg.layerComboBox.addItem(lyr.name())
+        self.dlg.layerComboBox.blockSignals(False)
+
+        target = next(
+            (i for i, lyr in enumerate(self._polygon_layers) if lyr.id() == layer.id()),
+            -1,
+        )
+        if target >= 0:
+            self.dlg.layerComboBox.setCurrentIndex(target)
+
+        self.iface.messageBar().pushMessage(
+            "TRACT Geolocation Formatter",
+            self.tr("Loaded {0} from TRACT ({1} features) — selected as the input layer.")
+            .format(filename, layer.featureCount()),
+            level=Qgis.Success,
+            duration=5,
+        )
 
     # ---------------------------------------------------------------------
     # Main entry point
@@ -570,6 +939,8 @@ class TractGeolocationFormatter:
             self.dlg = TractGeolocationFormatterDialog()
             # Connect browse button once
             self.dlg.outputBrowseButton.clicked.connect(self._browse_output_path)
+            # SPEC-tract-integration: load an input layer directly from TRACT.
+            self.dlg.loadFromTractButton.clicked.connect(self._load_layer_from_tract)
             # Connect NodeID radio buttons
             self.dlg.nodeExistingRadio.toggled.connect(self._update_nodeid_ui_state)
             self.dlg.nodeSameRadio.toggled.connect(self._update_nodeid_ui_state)
@@ -1245,8 +1616,18 @@ class TractGeolocationFormatter:
     # ---------------------------------------------------------------------
 
     # Adding a method to show a detailed report dialog with the summary and logs, instead of just a message box
-    def _show_report_dialog(self, summary_text):
-        """Show a wide, scrollable report dialog."""
+    def _show_report_dialog(self, summary_text, upload_paths=None,
+                            upload_needs_confirmation=False):
+        """Show a wide, scrollable report dialog.
+
+        When ``upload_paths`` is a non-empty list (the exported file, or the split
+        files, are on disk), also offer a "Send to TRACT" button that uploads them
+        directly from the report (WI-2 / GH-9 follow-up). With more than one path
+        (i.e. split output) the button sends all of them. If
+        ``upload_needs_confirmation`` is set (the dataset has NEEDS_FIX / skipped
+        features), clicking first asks the user to confirm, warning TRACT may
+        reject it.
+        """
         dialog = QDialog(self.iface.mainWindow())
         dialog.setWindowTitle(self.tr("TRACT Geolocation Formatter Report"))
         dialog.resize(1000, 700)
@@ -1265,6 +1646,34 @@ class TractGeolocationFormatter:
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, parent=dialog)
         button_box.accepted.connect(dialog.accept)
+
+        if upload_paths:
+            label = (self.tr("Send to TRACT…") if len(upload_paths) == 1
+                     else self.tr("Send {0} files to TRACT…").format(len(upload_paths)))
+            send_button = button_box.addButton(
+                label, QDialogButtonBox.ButtonRole.ActionRole
+            )
+
+            def _send_from_report():
+                if upload_needs_confirmation:
+                    reply = QMessageBox.question(
+                        dialog,
+                        self.tr("Upload to TRACT?"),
+                        self.tr(
+                            "Some features are flagged as NEEDS_FIX or were skipped, "
+                            "so TRACT's validation may reject this upload.\n\n"
+                            "Upload anyway?"
+                        ),
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if reply != QMessageBox.StandardButton.Yes:
+                        return  # keep the report open
+                dialog.accept()
+                self._send_files_to_tract(upload_paths)
+
+            send_button.clicked.connect(_send_from_report)
+
         layout.addWidget(button_box)
 
         dialog.exec()
@@ -2048,6 +2457,8 @@ class TractGeolocationFormatter:
         # Load output layer into QGIS
         layer_name = os.path.basename(output_path)
         output_layer = QgsVectorLayer(output_path, layer_name, "ogr")
+        # Remember this path so "Send to TRACT" can default to it (WI-2).
+        self._last_output_path = output_path
 
         if output_layer.isValid():
             QgsProject.instance().addMapLayer(output_layer)
@@ -2340,6 +2751,7 @@ class TractGeolocationFormatter:
             self._log("No unique NodeIDs to write; master data file not produced.")
 
         # GH-8: optional split of the clean output into N sibling files.
+        split_paths = None  # set to the list of split file paths on a successful split
         if split_enabled:
             try:
                 split_files = _split_geojson_by_node_id(output_path, split_count)
@@ -2359,6 +2771,7 @@ class TractGeolocationFormatter:
                 )
             else:
                 # Success: load each split file as its own layer (§3.6).
+                split_paths = [p for p, _count in split_files]
                 summary_lines.append(self.tr(""))
                 summary_lines.append(self.tr("Split output files:"))
                 for path, count in split_files:
@@ -2396,8 +2809,41 @@ class TractGeolocationFormatter:
                         .format(output_path, e)
                     )
 
+        # WI-2 follow-up: offer a direct upload from the report. When splitting
+        # ran, the full file is gone and we send the N split files instead; other-
+        # wise we send the single output file if it is still on disk. A clean
+        # dataset uploads directly; one with NEEDS_FIX / skipped features can still
+        # be uploaded, but the button first asks for confirmation.
+        upload_clean = needs_fix_count == 0 and skipped_count == 0
+        if split_paths:
+            upload_paths = list(split_paths)
+        elif output_path and os.path.exists(output_path):
+            upload_paths = [output_path]
+        else:
+            upload_paths = []
+
+        if upload_paths:
+            summary_lines.append("")
+            noun = (self.tr("this dataset") if len(upload_paths) == 1
+                    else self.tr("these {0} split files").format(len(upload_paths)))
+            if upload_clean:
+                summary_lines.append(self.tr(
+                    "Ready for TRACT — no features need manual fixing. Use "
+                    "“Send to TRACT” below to upload {0}."
+                ).format(noun))
+            else:
+                summary_lines.append(self.tr(
+                    "Some features are flagged as NEEDS_FIX or were skipped. You can "
+                    "still upload {0} with “Send to TRACT” below, but TRACT may "
+                    "reject it."
+                ).format(noun))
+
         # Rebuilds summary text
         summary_text = "\n".join(summary_lines)
         self._log(summary_text)
 
-        self._show_report_dialog(summary_text)
+        self._show_report_dialog(
+            summary_text,
+            upload_paths=upload_paths,
+            upload_needs_confirmation=bool(upload_paths) and not upload_clean,
+        )

@@ -3,7 +3,7 @@ name=TRACT Geolocation Formatter
 qgisMinimumVersion=3.0
 qgisMaximumVersion=4.99
 description=Validate, clean, and convert geolocation layers into the TRACT GeoJSON template for sustainability and traceability workflows.
-version=0.4.0
+version=0.5.0
 author=Luis Carrasco
 email=luiscartor@gmail.com
 
@@ -17,6 +17,20 @@ homepage=https://github.com/tract-eco/tract-geolocation-formatter
 hasProcessingProvider=no
 
 changelog=
+    0.5.0
+    - Optional TRACT platform integration (experimental). Configure a connection
+      under Plugins → “TRACT Connection Settings…” (TRACT API + Keycloak; the client
+      secret is stored in the encrypted QGIS auth database, never in plain settings).
+    - “Send to TRACT…”: upload a clean GeoJSON to TRACT and watch its ingestion
+      status. You can also upload straight from the export report — a “Send to TRACT”
+      button appears there; if the dataset still has features needing manual fixing it
+      asks for confirmation first, warning that TRACT may reject it.
+    - “Receive from TRACT…”: download a GeoJSON from TRACT by its full stored
+      filename and load it as an editable layer, ready to validate and fix. A
+      “Load from TRACT…” button in the main window does the same and selects the
+      downloaded layer as the input, so you can go straight into the transform.
+    - No data leaves your machine except these explicit upload/download actions to
+      the TRACT API you configure.
     0.4.0
     - Optional: split the clean GeoJSON output into 2–10 files so large datasets
       upload to TRACT under the size limit. Features sharing a NodeID always stay in

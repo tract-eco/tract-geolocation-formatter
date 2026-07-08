@@ -42,16 +42,30 @@
      <property name="title">
       <string>Input layer</string>
      </property>
-     <layout class="QHBoxLayout" name="layerLayout">
+     <layout class="QVBoxLayout" name="layerLayout">
       <item>
-       <widget class="QLabel" name="layerLabel">
-        <property name="text">
-         <string>Polygon layer:</string>
-        </property>
-       </widget>
+       <layout class="QHBoxLayout" name="layerSelectLayout">
+        <item>
+         <widget class="QLabel" name="layerLabel">
+          <property name="text">
+           <string>Polygon layer:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QComboBox" name="layerComboBox"/>
+        </item>
+       </layout>
       </item>
       <item>
-       <widget class="QComboBox" name="layerComboBox"/>
+       <widget class="QPushButton" name="loadFromTractButton">
+        <property name="text">
+         <string>Load from TRACT…</string>
+        </property>
+        <property name="toolTip">
+         <string>Download a GeoJSON from TRACT by its full stored filename and load it as a layer.</string>
+        </property>
+       </widget>
       </item>
      </layout>
     </widget>
