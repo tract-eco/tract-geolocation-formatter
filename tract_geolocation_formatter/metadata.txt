@@ -3,7 +3,7 @@ name=TRACT Geolocation Formatter
 qgisMinimumVersion=3.0
 qgisMaximumVersion=4.99
 description=Validate, clean, and convert geolocation layers into the TRACT GeoJSON template for sustainability and traceability workflows.
-version=0.5.0
+version=0.6.0
 author=Luis Carrasco
 email=luiscartor@gmail.com
 
@@ -17,6 +17,13 @@ homepage=https://github.com/tract-eco/tract-geolocation-formatter
 hasProcessingProvider=no
 
 changelog=
+    0.6.0
+    - Optional fixing of polygon holes. When holes are detected, the plugin asks
+      once per run how to handle them: Fill (drop the hole, area grows), Cut (open
+      the hole with a thin slit, area preserved), or Leave as-is (flag only). The
+      chosen method applies to every holed polygon in that run and is applied before
+      the output is written. Fixed features are re-checked, so a polygon whose only
+      problem was a hole becomes READY.
     0.5.0
     - Optional TRACT platform integration (experimental). Configure a connection
       under Plugins → “TRACT Connection Settings…” (TRACT API + Keycloak; the client

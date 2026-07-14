@@ -41,6 +41,8 @@ def _install_import_stubs():
         def __getattr__(self, _name):
             return _Any()
 
+    import importlib
+
     for name in (
         "shapely",
         "shapely.geometry",
@@ -51,7 +53,15 @@ def _install_import_stubs():
         "qgis.PyQt.QtWidgets",
         "qgis.core",
     ):
-        if name not in sys.modules:
+        if name in sys.modules:
+            continue
+        # Only stub modules that genuinely can't be imported — never clobber a
+        # real dependency (e.g. Shapely in a QGIS/venv env), which would poison
+        # other test modules that rely on the real one.
+        try:
+            importlib.import_module(name)
+            continue
+        except Exception:
             sys.modules[name] = _StubModule(name)
 
     # The plugin module does `from .TRACT_Geolocation_Formatter_dialog import
