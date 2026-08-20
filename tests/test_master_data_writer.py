@@ -89,7 +89,7 @@ class TestMasterDataCellMapping(unittest.TestCase):
         self.assertEqual(mapping["sheet_name"], "2.Farms_Template")
         self.assertEqual(mapping["name_col"], "B")
         self.assertEqual(mapping["country_col"], "E")
-        self.assertEqual(mapping["ref_id_col"], "I")
+        self.assertEqual(mapping["node_id_col"], "I")
 
         wb = openpyxl.load_workbook(_FARMS_TEMPLATE, read_only=True, data_only=True)
         try:
@@ -101,7 +101,34 @@ class TestMasterDataCellMapping(unittest.TestCase):
             }
             self.assertEqual(row2[mapping["name_col"]], "Farm Name")
             self.assertEqual(row2[mapping["country_col"]], "Country")
-            self.assertEqual(row2[mapping["ref_id_col"]], "Reference_ID")
+            self.assertEqual(row2[mapping["node_id_col"]], "Node_ID")
+        finally:
+            wb.close()
+
+    def test_farms_template_has_no_geojson_column(self):
+        """TRACT dropped the GeoJson column — the bundled template must match."""
+        wb = openpyxl.load_workbook(_FARMS_TEMPLATE, read_only=True, data_only=True)
+        try:
+            for sheet_name in ("2.Farms_Template", "3.Farms_Sample data"):
+                ws = wb[sheet_name]
+                headers = [
+                    cell.value
+                    for cell in next(ws.iter_rows(min_row=2, max_row=2))
+                    if cell.value is not None
+                ]
+                self.assertNotIn("GeoJson", headers, sheet_name)
+                self.assertIn("Node_ID", headers, sheet_name)
+                self.assertEqual(headers[-1], "Node_ID", sheet_name)
+        finally:
+            wb.close()
+
+    def test_farms_entry_sheet_ships_empty(self):
+        """No leftover sample/test data in the data-entry sheet's first row."""
+        wb = openpyxl.load_workbook(_FARMS_TEMPLATE, read_only=True, data_only=True)
+        try:
+            ws = wb["2.Farms_Template"]
+            row3 = next(ws.iter_rows(min_row=3, max_row=3))
+            self.assertEqual([c.value for c in row3 if c.value is not None], [])
         finally:
             wb.close()
 
@@ -110,7 +137,7 @@ class TestMasterDataCellMapping(unittest.TestCase):
         self.assertEqual(mapping["sheet_name"], "2. Farmer_Groups Template")
         self.assertEqual(mapping["name_col"], "A")
         self.assertEqual(mapping["country_col"], "C")
-        self.assertEqual(mapping["ref_id_col"], "G")
+        self.assertEqual(mapping["node_id_col"], "G")
 
         wb = openpyxl.load_workbook(_FARMER_GROUPS_TEMPLATE, read_only=True, data_only=True)
         try:
@@ -122,7 +149,7 @@ class TestMasterDataCellMapping(unittest.TestCase):
             }
             self.assertEqual(row2[mapping["name_col"]], "Farmer_Group_Name")
             self.assertEqual(row2[mapping["country_col"]], "Country")
-            self.assertEqual(row2[mapping["ref_id_col"]], "Reference_ID")
+            self.assertEqual(row2[mapping["node_id_col"]], "Node_ID")
         finally:
             wb.close()
 
@@ -188,7 +215,7 @@ class TestWriteMasterDataXlsx(unittest.TestCase):
             self.assertEqual(ws["B3"].value, "A")
             self.assertEqual(ws["B4"].value, "B")
             self.assertEqual(ws["B5"].value, "C")
-            # Country same on all 3 rows; Reference_ID equals Farm Name on every row
+            # Country same on all 3 rows; Node_ID equals Farm Name on every row
             for r in (3, 4, 5):
                 self.assertEqual(ws[f"E{r}"].value, "Colombia")
                 self.assertEqual(ws[f"I{r}"].value, ws[f"B{r}"].value)

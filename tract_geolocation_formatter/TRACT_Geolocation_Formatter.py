@@ -251,13 +251,13 @@ _MASTER_DATA_MAPPING = {
         "sheet_name": "2.Farms_Template",
         "name_col": "B",
         "country_col": "E",
-        "ref_id_col": "I",
+        "node_id_col": "I",
     },
     "farmer_groups": {
         "sheet_name": "2. Farmer_Groups Template",
         "name_col": "A",
         "country_col": "C",
-        "ref_id_col": "G",
+        "node_id_col": "G",
     },
 }
 
@@ -411,13 +411,13 @@ def _write_master_data_xlsx(template_path, output_path, master_data_type, countr
         ws = wb[mapping["sheet_name"]]
         name_col = mapping["name_col"]
         country_col = mapping["country_col"]
-        ref_id_col = mapping["ref_id_col"]
+        node_id_col = mapping["node_id_col"]
 
         for offset, node_id in enumerate(unique_node_ids):
             row = 3 + offset
             ws[f"{name_col}{row}"] = node_id
             ws[f"{country_col}{row}"] = country
-            ws[f"{ref_id_col}{row}"] = node_id
+            ws[f"{node_id_col}{row}"] = node_id
 
         wb.save(output_path)
     finally:
@@ -812,123 +812,149 @@ class TractGeolocationFormatter:
     # Geometries helper functions
     # ---------------------------------------------------------------------
     
+    def _polygon_rings_with_z(self, geom: QgsGeometry):
+        """
+        Extract polygon rings as lists of QgsPoint, preserving Z (and M) values.
+
+        Returns [[exterior, interior, ...], ...] — one list of rings per polygon
+        part — or None if the geometry is not polygonal. Used instead of
+        asPolygon() / asMultiPolygon(), which hand back QgsPointXY and so drop
+        Z; TRACT accepts Z values, so the pipeline must carry them through.
+        """
+        from qgis.core import QgsCurvePolygon, QgsLineString
+
+        parts = []
+        for part in geom.constParts():
+            if not isinstance(part, QgsCurvePolygon):
+                return None
+
+            exterior = part.exteriorRing()
+            if exterior is None:
+                return None
+
+            curves = [exterior] + [
+                part.interiorRing(i) for i in range(part.numInteriorRings())
+            ]
+
+            rings = []
+            for curve in curves:
+                if curve is None:
+                    return None
+                # Linearize curved rings — GeoJSON cannot carry curves anyway.
+                line = curve if isinstance(curve, QgsLineString) else curve.curveToLine()
+                rings.append(list(line.points()))
+            parts.append(rings)
+
+        return parts or None
+
+    def _build_polygon_geometry(self, parts, multipart: bool) -> QgsGeometry:
+        """
+        Rebuild a polygon / multipolygon geometry from _polygon_rings_with_z()
+        output, keeping the Z (and M) values carried by each QgsPoint.
+
+        Rings are rebuilt verbatim — degenerate rings are NOT dropped, so the
+        downstream TRACT geometry checks still see and report them.
+        """
+        from qgis.core import QgsGeometry, QgsLineString, QgsMultiPolygon, QgsPolygon
+
+        polygons = []
+        for rings in parts:
+            if not rings:
+                continue
+            polygon = QgsPolygon()
+            polygon.setExteriorRing(QgsLineString(rings[0]))
+            for hole in rings[1:]:
+                polygon.addInteriorRing(QgsLineString(hole))
+            polygons.append(polygon)
+
+        if not polygons:
+            return QgsGeometry()
+
+        if multipart or len(polygons) > 1:
+            multi = QgsMultiPolygon()
+            for polygon in polygons:
+                multi.addGeometry(polygon)
+            return QgsGeometry(multi)
+
+        return QgsGeometry(polygons[0])
+
     def _truncate_geometry_coordinates(self, geom: QgsGeometry, decimals: int = 6) -> QgsGeometry:
         """
-        Truncate all polygon / multipolygon coordinates to the given number of decimals
-        (no rounding).
+        Truncate all polygon / multipolygon X/Y coordinates to the given number
+        of decimals (no rounding).
+
+        Z values are carried through untouched — the precision rule applies to
+        lon/lat degrees, not to elevation.
         Returns a new QgsGeometry.
         """
         if geom.isEmpty():
             return geom
 
-        from qgis.core import QgsPointXY, QgsGeometry
+        from qgis.core import QgsPoint
         import math
 
-        def truncate(value, decimals):
-            factor = 10 ** decimals
-            return math.trunc(value * factor) / factor
-
-        def truncate_ring(ring):
-            truncated = []
-            for pt in ring:
-                truncated.append(
-                    QgsPointXY(
-                        truncate(pt.x(), decimals),
-                        truncate(pt.y(), decimals)
-                    )
-                )
-            return truncated
-
-        # Polygon
-        if not geom.isMultipart():
-            poly = geom.asPolygon()
-            if not poly:
-                return geom
-
-            truncated_poly = []
-            for ring in poly:
-                truncated_poly.append(truncate_ring(ring))
-
-            return QgsGeometry.fromPolygonXY(truncated_poly)
-
-        # MultiPolygon
-        mp = geom.asMultiPolygon()
-        if not mp:
+        parts = self._polygon_rings_with_z(geom)
+        if parts is None:
             return geom
 
-        truncated_mp = []
-        for poly in mp:
-            truncated_poly = []
-            for ring in poly:
-                truncated_poly.append(truncate_ring(ring))
-            truncated_mp.append(truncated_poly)
+        factor = 10 ** decimals
 
-        return QgsGeometry.fromMultiPolygonXY(truncated_mp)
+        def truncate(value):
+            return math.trunc(value * factor) / factor
+
+        truncated = []
+        for rings in parts:
+            truncated.append([
+                [
+                    QgsPoint(
+                        truncate(pt.x()),
+                        truncate(pt.y()),
+                        pt.z(),
+                        pt.m(),
+                        pt.wkbType(),
+                    )
+                    for pt in ring
+                ]
+                for ring in rings
+            ])
+
+        return self._build_polygon_geometry(truncated, geom.isMultipart())
 
     def _fix_duplicate_vertices(self, geom: QgsGeometry) -> QgsGeometry:
         """
-        Remove consecutive duplicate vertices from a polygon or multipolygon geometry.
+        Remove consecutive duplicate vertices from a polygon or multipolygon
+        geometry. Vertices are compared on X/Y only; the Z value of the vertex
+        that is kept is carried through.
         Returns a repaired QgsGeometry.
         """
 
         if geom.isEmpty():
             return geom
 
-        def clean_ring(coords):
-            if not coords:
-                return coords
+        parts = self._polygon_rings_with_z(geom)
+        if parts is None:
+            return geom
 
-            cleaned = [coords[0]]
-            for i in range(1, len(coords)):
-                if coords[i] != coords[i - 1]:
-                    cleaned.append(coords[i])
+        def clean_ring(ring):
+            if not ring:
+                return ring
+
+            cleaned = [ring[0]]
+            for pt in ring[1:]:
+                previous = cleaned[-1]
+                if (pt.x(), pt.y()) != (previous.x(), previous.y()):
+                    cleaned.append(pt)
 
             # Ensure closure
-            if cleaned[0] != cleaned[-1]:
+            if (cleaned[0].x(), cleaned[0].y()) != (cleaned[-1].x(), cleaned[-1].y()):
                 cleaned.append(cleaned[0])
 
             return cleaned
 
-        from qgis.core import QgsPointXY, QgsGeometry
+        cleaned = [[clean_ring(ring) for ring in rings] for rings in parts]
 
-        # ---- Handle simple Polygon ----
-        if geom.isMultipart() is False:
-            poly = geom.asPolygon()   # [[(x,y), (x,y), ...], [hole], ...]
-            if not poly:
-                return geom
+        return self._build_polygon_geometry(cleaned, geom.isMultipart())
 
-            new_rings = []
-            for ring in poly:
-                coords = [(pt.x(), pt.y()) for pt in ring]
-                new_coords = clean_ring(coords)
-                new_rings.append([QgsPointXY(x, y) for x, y in new_coords])
-
-            return QgsGeometry.fromPolygonXY(new_rings)
-
-        # ---- Handle MultiPolygon ----
-        else:
-            mp = geom.asMultiPolygon()  # list of polygons → each polygon = list of rings
-            if not mp:
-                return geom
-
-            new_polygons = []
-            for poly in mp:
-                new_rings = []
-                for ring in poly:
-                    coords = [(pt.x(), pt.y()) for pt in ring]
-                    new_coords = clean_ring(coords)
-                    new_rings.append([QgsPointXY(x, y) for x, y in new_coords])
-                new_polygons.append(new_rings)
-
-            return QgsGeometry.fromMultiPolygonXY(new_polygons)
-
-
-    def _has_z_values(self, geom: QgsGeometry) -> bool:
-        """
-        Detect real Z-enabled geometries based on WKB type.
-        """
-        return QgsWkbTypes.hasZ(geom.wkbType())
-    
     # Helper to get NodeID and PlotID for a feature
     def _get_ids(
         self,
@@ -1061,19 +1087,14 @@ class TractGeolocationFormatter:
         # Merge polygon parts into a multipolygon if possible
         collected = []
         for part_geom in parts:
-            if part_geom.isMultipart():
-                mp = part_geom.asMultiPolygon()
-                if mp:
-                    collected.extend(mp)
-            else:
-                poly = part_geom.asPolygon()
-                if poly:
-                    collected.append(poly)
+            rings = self._polygon_rings_with_z(part_geom)
+            if rings:
+                collected.extend(rings)
 
         if not collected:
             return QgsGeometry()
 
-        return QgsGeometry.fromMultiPolygonXY(collected)
+        return self._build_polygon_geometry(collected, True)
 
 
     def _extract_polygon_rings(self, geom: QgsGeometry):
@@ -1203,42 +1224,6 @@ class TractGeolocationFormatter:
             errors.append(_format_self_intersection_message(points))
 
         return errors
-
-    # no need for drop_z_values function anymore, as we save with 2D type directly
-    # def _drop_z_values(self, geom: QgsGeometry) -> QgsGeometry:
-    #     """
-    #     Universal, QGIS-version-safe removal of Z values.
-    #     Converts geometry to WKT, strips Z notation and 3rd coordinate,
-    #     then rebuilds a 2D geometry.
-    #     """
-    #     if geom.isEmpty():
-    #         return geom
-
-    #     wkt = geom.asWkt()
-
-    #     # Remove the ' Z ' dimension tag
-    #     wkt = re.sub(r'\bZ\b', '', wkt)
-
-    #     # Remove third coordinates (x y z → x y)
-    #     # Handles decimals, negatives, scientific notation
-    #     wkt = re.sub(
-    #         r'(\d+(\.\d+)?([eE][-+]?\d+)?)[ ]+(\d+(\.\d+)?([eE][-+]?\d+)?)[ ]+(\d+(\.\d+)?([eE][-+]?\d+)?)',
-    #         r'\1 \4',
-    #         wkt
-    #     )
-
-    #     # Build new 2D geometry
-    #     new_geom = QgsGeometry.fromWkt(wkt)
-
-    #     if new_geom is None or new_geom.isEmpty():
-    #         # fail-safe
-    #         return geom
-
-    #     return new_geom
-
-
-
-
 
     # ---------------------------------------------------------------------
     # Main transformation logic
@@ -1517,8 +1502,9 @@ class TractGeolocationFormatter:
         # Output fields: original layer fields (with exclusion/rename) + TRACT fields
         out_fields, rename_map = self._build_output_fields(layer.fields(), excluded_fields)
 
+        # TRACT accepts Z values, so the output keeps the layer's own
+        # dimensionality instead of being forced down to a 2D WKB type.
         geom_type = layer.wkbType()
-        geom_type_2d = QgsWkbTypes.dropZ(geom_type)
 
         save_options = QgsVectorFileWriter.SaveVectorOptions()
         save_options.driverName = "GeoJSON"
@@ -1527,7 +1513,7 @@ class TractGeolocationFormatter:
         writer = QgsVectorFileWriter.create(
             output_path,
             out_fields,
-            geom_type_2d,
+            geom_type,
             target_crs,
             QgsProject.instance().transformContext(),
             save_options
@@ -1598,32 +1584,6 @@ class TractGeolocationFormatter:
                 #         invalid_features.append((f.id(), "Invalid geometry (cannot make valid)"))
                 #         continue
                 #     geom = fixed
-
-                # --- Z-value removal ---
-                if self._has_z_values(geom):
-                    if f.id() not in repair_log:
-                        repair_log[f.id()] = []
-                    repair_log[f.id()].append("Removed Z values")
-
-                    node_id, plot_id = self._get_ids(
-                        f,
-                        layer,
-                        node_use_existing,
-                        node_field_name,
-                        node_same,
-                        node_same_value,
-                        plot_existing,
-                        plot_field_name,
-                    )
-
-                    validation_rows.append({
-                        "feature_id": f.id(),
-                        "NodeID": node_id,
-                        "PlotID": plot_id,
-                        "status": "WARNING",
-                        "issue_type": "z_values",
-                        "message": "Removed Z values"
-                    })
 
                 # Reproject to EPSG:4326 first
                 if coord_transform is not None:
@@ -2224,15 +2184,14 @@ class TractGeolocationFormatter:
             self.tr("Features with geometry repairs applied: {}").format(len(repair_log))
             )
 
-            # GH-9: inside the geometry repair details, the two most common, safe
-            # auto-fixes — coordinate rounding and Z-value removal — are summarized
-            # as feature counts instead of one line per feature. All other repairs
-            # are still listed per feature. The full per-feature log always remains
-            # in the CSV report.
+            # GH-9: inside the geometry repair details, coordinate rounding —
+            # the most common, safe auto-fix — is summarized as a feature count
+            # instead of one line per feature. All other repairs are still
+            # listed per feature. The full per-feature log always remains in
+            # the CSV report.
             round_msg = f"Rounded coordinates to {COORD_DECIMALS} decimals"
             summarized_counts = {
                 round_msg: 0,
-                "Removed Z values": 0,
             }
             detailed = {}  # { feature_id : [ per-feature repair messages ] }
             for fid, messages in repair_log.items():
@@ -2249,11 +2208,6 @@ class TractGeolocationFormatter:
                 summary_lines.append(
                     self.tr("  Coordinates rounded to {0} decimals for {1} features")
                     .format(COORD_DECIMALS, summarized_counts[round_msg])
-                )
-            if summarized_counts["Removed Z values"]:
-                summary_lines.append(
-                    self.tr("  Z values removed from {} features")
-                    .format(summarized_counts["Removed Z values"])
                 )
 
             # All other repairs (duplicate vertices, makeValid, failed repairs)

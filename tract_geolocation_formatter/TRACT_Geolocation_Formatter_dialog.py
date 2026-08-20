@@ -23,7 +23,6 @@ class TractGeolocationFormatterDialog(QtWidgets.QDialog, FORM_CLASS):
             "It automatically validates and repairs common geometry issues:\n"
             "- Removal of consecutive duplicate vertices\n"
             "- Geometry validation and repair (makeValid)\n"
-            "- Removal of Z values\n"
             "- Coordinate rounding\n"
             "- Reprojection to EPSG:4326\n\n"
             "The tool also performs data quality checks:\n"
