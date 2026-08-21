@@ -25,6 +25,7 @@
 import os
 import re
 import json
+from html import escape as _escape_html
 from shapely.geometry import shape, LineString
 
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
@@ -36,7 +37,7 @@ from qgis.PyQt.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QLabel,
-    QPlainTextEdit,
+    QTextEdit,
     QDialogButtonBox,
     QProgressBar,
     QApplication
@@ -227,6 +228,152 @@ def _format_self_intersection_message(points):
     rendered = " | ".join(f"{lon:.6f},{lat:.6f}" for (lon, lat) in head)
     suffix = f" (and {extra} more)" if extra > 0 else ""
     return f"{base} at: {rendered}{suffix}"
+
+
+# ---------------------------------------------------------------------------
+# Report formatting helpers
+#
+# The pop-up report is built once as a structured document, then rendered two
+# ways: Qt rich text for the dialog (normal UI font, bold headings, columns
+# aligned by real table cells) and plain text for logging.
+# ---------------------------------------------------------------------------
+
+def _plural(count, singular, plural=None):
+    """Render "1 feature" / "4 features" so summary lines read naturally."""
+    if plural is None:
+        plural = singular + "s"
+    return f"{count} {singular if count == 1 else plural}"
+
+
+def _format_aligned_rows(rows, indent="  ", gap=2):
+    """Render (label, value) pairs as two space-aligned columns.
+
+    Used by the plain-text rendering of the report. An empty label produces a
+    continuation row aligned under the value column, for listing several values
+    under one label. Rows with an empty value come back as just the label —
+    trailing padding is always stripped.
+    """
+    width = max((len(label) for label, _value in rows), default=0)
+    return [
+        f"{indent}{label.ljust(width)}{' ' * gap}{value}".rstrip()
+        for label, value in rows
+    ]
+
+
+class _ReportBuilder:
+    """Accumulate the export report, then render it as rich text or plain text.
+
+    The dialog shows the report in the window's normal UI font, so column
+    alignment comes from real table cells rather than padding spaces. Every
+    caller-supplied string is HTML-escaped when rendering, so user data
+    (paths, PlotIDs, field values) can never inject markup.
+    """
+
+    # Indent step for the rich-text rendering, in px; the plain-text rendering
+    # uses two spaces per level.
+    _INDENT_PX = 18
+
+    def __init__(self):
+        self._elements = []  # list of (kind, payload, level)
+
+    # -- building -----------------------------------------------------------
+
+    def title(self, text):
+        """The opening line of the report."""
+        self._elements.append(("title", text, 0))
+
+    def section(self, text):
+        """A top-level section heading, rendered bold."""
+        self._elements.append(("section", text, 0))
+
+    def subsection(self, text, level=1):
+        """An issue-group heading nested inside a section."""
+        self._elements.append(("subsection", text, level))
+
+    def rows(self, rows, level=1):
+        """A two-column block. An empty label continues the row above it."""
+        rows = [r for r in rows]
+        if rows:
+            self._elements.append(("rows", rows, level))
+
+    def bullet(self, text, level=1):
+        """A dash-prefixed line, for warnings."""
+        self._elements.append(("bullet", text, level))
+
+    def note(self, text, level=1):
+        """An unprefixed line, for truncation notices and asides."""
+        self._elements.append(("note", text, level))
+
+    # -- rendering ----------------------------------------------------------
+
+    def to_plain_text(self):
+        lines = []
+        previous = None
+        for kind, payload, level in self._elements:
+            indent = "  " * max(level, 1)
+            # A run of bullets is set off from whatever precedes it.
+            if kind == "bullet" and previous not in (None, "bullet"):
+                lines.append("")
+            previous = kind
+            if kind == "title":
+                lines.append(payload)
+            elif kind == "section":
+                lines.extend(["", payload])
+            elif kind == "subsection":
+                lines.append(f"{indent}{payload}")
+            elif kind == "rows":
+                lines.extend(_format_aligned_rows(payload, indent=indent, gap=4))
+            elif kind == "bullet":
+                lines.append(f"{indent}- {payload}")
+            else:  # note
+                lines.append(f"{indent}{payload}")
+        return "\n".join(lines)
+
+    def to_html(self):
+        parts = []
+        previous = None
+        for kind, payload, level in self._elements:
+            margin = level * self._INDENT_PX
+            # A run of bullets is set off from whatever precedes it.
+            bullet_top = 3 if previous == "bullet" else 12
+            previous = kind
+            if kind == "title":
+                parts.append(
+                    f'<p style="margin:0 0 4px 0">{_escape_html(payload)}</p>'
+                )
+            elif kind == "section":
+                parts.append(
+                    '<p style="margin:16px 0 4px 0">'
+                    f'<b>{_escape_html(payload)}</b></p>'
+                )
+            elif kind == "subsection":
+                parts.append(
+                    f'<p style="margin:10px 0 2px {margin}px">'
+                    f'{_escape_html(payload)}</p>'
+                )
+            elif kind == "rows":
+                cells = "".join(
+                    '<tr>'
+                    f'<td style="padding-right:20px">{_escape_html(label)}</td>'
+                    f'<td>{_escape_html(value)}</td>'
+                    '</tr>'
+                    for label, value in payload
+                )
+                parts.append(
+                    f'<table border="0" cellspacing="0" cellpadding="3" '
+                    f'style="margin-left:{margin}px">{cells}</table>'
+                )
+            elif kind == "bullet":
+                parts.append(
+                    f'<p style="margin:{bullet_top}px 0 0 {margin}px">'
+                    f'&#8211;&nbsp;{_escape_html(payload)}</p>'
+                )
+            else:  # note
+                parts.append(
+                    f'<p style="margin:3px 0 0 {margin}px">'
+                    f'{_escape_html(payload)}</p>'
+                )
+        return "".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -1230,8 +1377,8 @@ class TractGeolocationFormatter:
     # ---------------------------------------------------------------------
 
     # Adding a method to show a detailed report dialog with the summary and logs, instead of just a message box
-    def _show_report_dialog(self, summary_text):
-        """Show a wide, scrollable report dialog."""
+    def _show_report_dialog(self, report_html):
+        """Show a wide, scrollable report dialog rendered from Qt rich text."""
         dialog = QDialog(self.iface.mainWindow())
         dialog.setWindowTitle(self.tr("TRACT Geolocation Formatter Report"))
         dialog.resize(1000, 700)
@@ -1243,9 +1390,12 @@ class TractGeolocationFormatter:
         intro_label.setWordWrap(True)
         layout.addWidget(intro_label)
 
-        report_text_edit = QPlainTextEdit(dialog)
+        # Rich text, so the report keeps the window's normal UI font while
+        # still getting bold headings and table-aligned columns. No colours or
+        # font families are set — everything inherits the active QGIS theme.
+        report_text_edit = QTextEdit(dialog)
         report_text_edit.setReadOnly(True)
-        report_text_edit.setPlainText(summary_text)
+        report_text_edit.setHtml(report_html)
         layout.addWidget(report_text_edit)
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, parent=dialog)
@@ -2046,25 +2196,35 @@ class TractGeolocationFormatter:
 
         #     export_blocked = True
 
+        def _plot_id_suffix(fid):
+            """Return " (PlotID = X)" when a PlotID field is in use and set, else ""."""
+            if fid < len(features) and plot_existing and plot_field_name:
+                idx = layer.fields().indexFromName(plot_field_name)
+                if idx != -1:
+                    val = features[fid].attributes()[idx]
+                    if val not in (None, ""):
+                        return f" (PlotID = {val})"
+            return ""
+
         def _feature_label(fid):
-            """
-            Helper to build a human-readable feature label, including PlotID if present.
-            """
-            plot_id = None
+            """Human-readable feature label, including PlotID if present."""
+            # +1 for user-friendly 1-based indexing
+            return f"Feature {fid + 1}{_plot_id_suffix(fid)}"
 
-            if fid < len(features):
-                f = features[fid]
-                if plot_existing and plot_field_name:
-                    idx = layer.fields().indexFromName(plot_field_name)
-                    if idx != -1:
-                        val = f.attributes()[idx]
-                        if val not in (None, ""):
-                            plot_id = str(val)
+        def _feature_list(fids, max_items=20):
+            """Render a group of features inline, e.g. "Features 7, 8".
 
-            if plot_id:
-                return f"Feature {fid +1} (PlotID = {plot_id})" # Adding 1 to fid for user-friendly 1-based indexing
-            else:
-                return f"Feature {fid +1}"
+            Used where several features share one message, so the report shows
+            one line per message instead of one line per feature.
+            """
+            fids = list(fids)
+            rendered = ", ".join(
+                f"{fid + 1}{_plot_id_suffix(fid)}" for fid in fids[:max_items]
+            )
+            if len(fids) > max_items:
+                rendered += self.tr(", and {} more").format(len(fids) - max_items)
+            template = self.tr("Feature {}") if len(fids) == 1 else self.tr("Features {}")
+            return template.format(rendered)
 
 
         # BUILD SUMMARY REPORT
@@ -2076,157 +2236,136 @@ class TractGeolocationFormatter:
         #     + len(polygon_hole_features)
         # )
 
-        summary_lines = [
-            self.tr("TRACT GeoJSON export finished."),
-            self.tr("Output file: {}").format(output_path),
-            self.tr(""),
-            self.tr("Total input features: {}").format(total_count),
-            self.tr("Successfully written features: {}").format(written_count),
-            self.tr("Written features needing manual fix: {}").format(needs_fix_count),
-            self.tr("Skipped features: {}").format(skipped_count),
-        ]
+        report = _ReportBuilder()
+        report.title(self.tr("TRACT GeoJSON export finished."))
 
-        if skipped_count > 0:
-            summary_lines.append("")
-            summary_lines.append(self.tr("WARNING: Some features could not be written to the output file."))
-            summary_lines.append(self.tr("The output file contains fewer geolocations than the input file."))
-            summary_lines.append(self.tr("Please review the skipped features before using the output."))
-
+        report.section(self.tr("SUMMARY"))
+        written_value = str(written_count)
         if needs_fix_count > 0:
-            summary_lines.append("")
-            summary_lines.append(self.tr("WARNING: Some written features still require manual fixing before upload to TRACT."))
-            summary_lines.append(self.tr("These features are included in the output file with TRACTStatus = NEEDS_FIX."))
-            summary_lines.append("")
+            written_value = self.tr("{0}   ({1} need manual fix)").format(
+                written_count, needs_fix_count
+            )
+        report.rows([
+            (self.tr("Input features"), str(total_count)),
+            (self.tr("Written"), written_value),
+            (self.tr("Skipped"), str(skipped_count)),
+        ])
 
-
-        if invalid_features:
-            summary_lines.append("")
-            summary_lines.append(self.tr("Skipped features:"))
-            for fid, reason in invalid_features[:500]:
-                summary_lines.append(f"  - {_feature_label(fid)}: {reason}")
-
-    
-
-
-        # --- Blocking validation errors (grouped) ---
-        # --- Written features requiring manual fix (grouped) ---
-        if small_area_features or small_area_part_features or polygon_hole_features or tract_manual_fix_features:
-            summary_lines.append("")
-            summary_lines.append(self.tr("Written features requiring manual fix:"))
-
-            if small_area_features:
-                summary_lines.append(
-                    self.tr("Polygons below minimum area ({} ha):").format(MIN_PLOT_AREA_HA)
-                )
-                for fid, area in small_area_features[:500]:
-                    summary_lines.append(
-                        f"  - {_feature_label(fid)}: {area:.4f} ha"
-                    )
-
-                if len(small_area_features) > 500:
-                    summary_lines.append(
-                        f"  ... and {len(small_area_features) - 500} more polygons."
-                    )
-
-            if small_area_part_features:
-                summary_lines.append("")
-                summary_lines.append(
-                    self.tr("Polygon parts below minimum area ({} ha):").format(MIN_PLOT_AREA_HA)
-                )
-                for fid, part_idx, area in small_area_part_features[:500]:
-                    summary_lines.append(
-                        f"  - {_feature_label(fid)}, part {part_idx}: {area:.4f} ha"
-                    )
-
-                if len(small_area_part_features) > 500:
-                    summary_lines.append(
-                        f"  ... and {len(small_area_part_features) - 500} more polygon parts."
-                    )
-
-            if polygon_hole_features:
-                summary_lines.append("")
-                summary_lines.append(
-                    self.tr("Polygons with interior holes detected:")
-                )
-
-                for fid in polygon_hole_features[:500]:
-                    summary_lines.append(
-                        f"  - {_feature_label(fid)}"
-                    )
-
-                if len(polygon_hole_features) > 500:
-                    summary_lines.append(
-                        f"  ... and {len(polygon_hole_features) - 500} more polygons."
-                    )
-
-
-            if tract_manual_fix_features:
-                summary_lines.append("")
-                summary_lines.append(
-                    self.tr("TRACT-specific geometry validation issues:")
-                )
-
-                for fid, errors in tract_manual_fix_features[:500]:
-                    summary_lines.append(
-                        f"  - {_feature_label(fid)}: {'; '.join(errors)}"
-                    )
-
-                if len(tract_manual_fix_features) > 500:
-                    summary_lines.append(
-                        f"  ... and {len(tract_manual_fix_features) - 500} more polygons."
-                    )
-
-
-
-        if repair_log:
-
-            summary_lines.append(
-            self.tr("Features with geometry repairs applied: {}").format(len(repair_log))
+        # One line per warning — the counts above already carry the numbers, so
+        # the prose only has to say what the consequence is.
+        if skipped_count > 0:
+            report.bullet(
+                self.tr("{} skipped — the output has fewer geolocations than the "
+                        "input; review them before using it.")
+                .format(_plural(skipped_count, "feature"))
+            )
+        if needs_fix_count > 0:
+            report.bullet(
+                self.tr("{} written with TRACTStatus = NEEDS_FIX; fix them before "
+                        "upload to TRACT.")
+                .format(_plural(needs_fix_count, "feature"))
             )
 
-            # GH-9: inside the geometry repair details, coordinate rounding —
-            # the most common, safe auto-fix — is summarized as a feature count
-            # instead of one line per feature. All other repairs are still
-            # listed per feature. The full per-feature log always remains in
-            # the CSV report.
+        if invalid_features:
+            report.section(
+                self.tr("SKIPPED FEATURES ({})").format(len(invalid_features))
+            )
+            shown = invalid_features[:500]
+            report.rows([(_feature_label(fid), reason) for fid, reason in shown])
+            if len(invalid_features) > 500:
+                report.note(
+                    self.tr("... and {} more.").format(len(invalid_features) - len(shown))
+                )
+
+        # --- Written features requiring manual fix (grouped by issue) ---
+        if small_area_features or small_area_part_features or polygon_hole_features or tract_manual_fix_features:
+            report.section(self.tr("NEEDS MANUAL FIX ({})").format(needs_fix_count))
+
+            def _issue_block(title, rows, total, more_noun):
+                """Emit one issue group: heading with count, then its rows."""
+                report.subsection(f"{title} ({total})")
+                report.rows(rows, level=2)
+                if total > len(rows):
+                    report.note(
+                        self.tr("... and {0} more {1}.").format(total - len(rows), more_noun),
+                        level=2,
+                    )
+
+            if small_area_features:
+                _issue_block(
+                    self.tr("Below minimum area, {} ha").format(MIN_PLOT_AREA_HA),
+                    [
+                        (_feature_label(fid), f"{area:.4f} ha")
+                        for fid, area in small_area_features[:500]
+                    ],
+                    len(small_area_features),
+                    self.tr("polygons"),
+                )
+
+            if small_area_part_features:
+                _issue_block(
+                    self.tr("Polygon part below minimum area, {} ha").format(MIN_PLOT_AREA_HA),
+                    [
+                        (self.tr("{0}, part {1}").format(_feature_label(fid), part_idx),
+                         f"{area:.4f} ha")
+                        for fid, part_idx, area in small_area_part_features[:500]
+                    ],
+                    len(small_area_part_features),
+                    self.tr("polygon parts"),
+                )
+
+            if polygon_hole_features:
+                _issue_block(
+                    self.tr("Interior holes"),
+                    [(_feature_label(fid), "") for fid in polygon_hole_features[:500]],
+                    len(polygon_hole_features),
+                    self.tr("polygons"),
+                )
+
+            if tract_manual_fix_features:
+                _issue_block(
+                    self.tr("TRACT geometry validation"),
+                    [
+                        (_feature_label(fid), "; ".join(errors))
+                        for fid, errors in tract_manual_fix_features[:500]
+                    ],
+                    len(tract_manual_fix_features),
+                    self.tr("polygons"),
+                )
+
+        if repair_log:
+            report.section(
+                self.tr("REPAIRS APPLIED ({})").format(_plural(len(repair_log), "feature"))
+            )
+
+            # GH-9: coordinate rounding — the most common, safe auto-fix — is
+            # summarized as a feature count. Every other repair is still shown,
+            # but features sharing a message are grouped onto one line rather
+            # than getting a line each. The full per-feature log always remains
+            # in the CSV report.
             round_msg = f"Rounded coordinates to {COORD_DECIMALS} decimals"
-            summarized_counts = {
-                round_msg: 0,
-            }
-            detailed = {}  # { feature_id : [ per-feature repair messages ] }
+            grouped = {}  # { message : [ feature_id, ... ] } — insertion-ordered
             for fid, messages in repair_log.items():
                 for msg in messages:
-                    if msg in summarized_counts:
-                        summarized_counts[msg] += 1
-                    else:
-                        detailed.setdefault(fid, []).append(msg)
+                    grouped.setdefault(msg, []).append(fid)
 
-            summary_lines.append("")
-            summary_lines.append(self.tr("Geometry repair details:"))
+            repair_rows = []
+            rounded_fids = grouped.pop(round_msg, None)
+            if rounded_fids:
+                repair_rows.append((
+                    self.tr("Coordinates rounded to {} decimals").format(COORD_DECIMALS),
+                    _plural(len(rounded_fids), "feature"),
+                ))
+            for msg, fids in grouped.items():
+                repair_rows.append((msg, _feature_list(fids)))
 
-            if summarized_counts[round_msg]:
-                summary_lines.append(
-                    self.tr("  Coordinates rounded to {0} decimals for {1} features")
-                    .format(COORD_DECIMALS, summarized_counts[round_msg])
-                )
+            report.rows(repair_rows)
 
-            # All other repairs (duplicate vertices, makeValid, failed repairs)
-            # remain listed per feature.
-            max_display = 100
-            display_ids = list(detailed.keys())[:max_display]
-
-            for fid in display_ids:
-                for msg in detailed[fid]:
-                    summary_lines.append(f"  - {_feature_label(fid)}: {msg}")
-
-            if len(detailed) > max_display:
-                summary_lines.append(
-                    f"  ... and {len(detailed) - max_display} more features with repairs."
-                )
-
-
-        summary_text = "\n".join(summary_lines)
-        self._log(summary_text)
+        # Paths are gathered here and rendered together in the closing FILES
+        # section, instead of being scattered through the report.
+        master_data_written = None
+        split_written = None
+        split_removed_full_output = False
 
         # Write validation report CSV if there are any validation rows
         report_path = None
@@ -2249,10 +2388,6 @@ class TractGeolocationFormatter:
                 writer.writeheader()
                 for row in validation_rows:
                     writer.writerow(row)
-
-        if report_path:
-            summary_lines.append(self.tr(""))
-            summary_lines.append(self.tr("Validation report written to: {}").format(report_path))
 
         # GH-6: optional Master Data XLSX write — runs after GeoJSON + CSV report
         # are produced. Failure here surfaces as a warning but does NOT mark the
@@ -2278,10 +2413,7 @@ class TractGeolocationFormatter:
                 self._log(
                     self.tr("Master Data file written: {}").format(master_data_output)
                 )
-                summary_lines.append(self.tr(""))
-                summary_lines.append(
-                    self.tr("Master Data file written to: {}").format(master_data_output)
-                )
+                master_data_written = master_data_output
             except Exception as e:
                 self._log(self.tr("Master Data write failed: {}").format(e))
                 QMessageBox.warning(
@@ -2313,12 +2445,8 @@ class TractGeolocationFormatter:
                 )
             else:
                 # Success: load each split file as its own layer (§3.6).
-                summary_lines.append(self.tr(""))
-                summary_lines.append(self.tr("Split output files:"))
+                split_written = split_files
                 for path, count in split_files:
-                    summary_lines.append(
-                        self.tr("  {0}  ({1} features)").format(path, count)
-                    )
                     split_layer = QgsVectorLayer(path, os.path.basename(path), "ogr")
                     if split_layer.isValid():
                         QgsProject.instance().addMapLayer(split_layer)
@@ -2339,19 +2467,37 @@ class TractGeolocationFormatter:
                     pass
                 try:
                     os.remove(output_path)
-                    summary_lines.append(self.tr(""))
-                    summary_lines.append(
-                        self.tr("Full output split into {0} files and removed: {1}")
-                        .format(len(split_files), output_path)
-                    )
+                    split_removed_full_output = True
                 except OSError as e:
                     self._log(
                         self.tr("Could not delete full output {0}: {1}")
                         .format(output_path, e)
                     )
 
-        # Rebuilds summary text
-        summary_text = "\n".join(summary_lines)
-        self._log(summary_text)
+        # FILES — every produced path, in one aligned block.
+        file_rows = []
+        if not split_removed_full_output:
+            file_rows.append((self.tr("Output"), output_path))
+        if split_written:
+            for index, (path, count) in enumerate(split_written):
+                file_rows.append((
+                    self.tr("Split output") if index == 0 else "",
+                    self.tr("{0}  ({1} features)").format(path, count),
+                ))
+        if report_path:
+            file_rows.append((self.tr("Validation report"), report_path))
+        if master_data_written:
+            file_rows.append((self.tr("Master Data"), master_data_written))
 
-        self._show_report_dialog(summary_text)
+        if file_rows:
+            report.section(self.tr("FILES"))
+            report.rows(file_rows)
+        if split_removed_full_output:
+            report.note(
+                self.tr("The combined output was split into {} files and removed.")
+                .format(len(split_written))
+            )
+
+        self._log(report.to_plain_text())
+
+        self._show_report_dialog(report.to_html())
