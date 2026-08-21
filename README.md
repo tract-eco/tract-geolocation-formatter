@@ -98,7 +98,7 @@ The user picks:
 - Type: **Farms** or **Farmer Groups**
 - Country: a single value applied to every row (selected from TRACT's published country list)
 
-The plugin populates one row per unique NodeID, with the name and reference fields both set to the NodeID, leaving all other template columns untouched. The output preserves the complete TRACT template structure — all sheets, branding, headers, and validation rules — so it can be uploaded to TRACT without any further manual editing.
+The plugin populates one row per unique NodeID, with the name and Node_ID fields both set to the NodeID, leaving all other template columns untouched. The output preserves the complete TRACT template structure — all sheets, branding, headers, and validation rules — so it can be uploaded to TRACT without any further manual editing.
 
 ### Split output (optional)
 

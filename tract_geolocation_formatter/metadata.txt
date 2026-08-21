@@ -3,7 +3,7 @@ name=TRACT Geolocation Formatter
 qgisMinimumVersion=3.0
 qgisMaximumVersion=4.99
 description=Validate, clean, and convert geolocation layers into the TRACT GeoJSON template for sustainability and traceability workflows.
-version=0.4.0
+version=0.5.0
 author=Luis Carrasco
 email=luiscartor@gmail.com
 
@@ -17,6 +17,14 @@ homepage=https://github.com/tract-eco/tract-geolocation-formatter
 hasProcessingProvider=no
 
 changelog=
+    0.5.0
+    - Z values are no longer stripped — TRACT accepts them, so Z is preserved end
+      to end in the output GeoJSON. X/Y are still truncated to 6 decimals.
+    - Master Data templates updated to TRACT's current schema: Reference_ID is now
+      Node_ID in both templates, and the Farms GeoJson column has been dropped.
+    - Cleaner report pop-up: labelled sections with counts, shown in the normal UI
+      font with bold headings, and all output paths grouped at the end. Same
+      information as before; the CSV validation report is unchanged.
     0.4.0
     - Optional: split the clean GeoJSON output into 2–10 files so large datasets
       upload to TRACT under the size limit. Features sharing a NodeID always stay in
