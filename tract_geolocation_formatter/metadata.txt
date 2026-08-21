@@ -18,6 +18,12 @@ hasProcessingProvider=no
 
 changelog=
     0.5.0
+    - Optional fixing of polygon holes. When holes are detected, the plugin asks
+      once per run how to handle them: Fill (drop the hole, area grows), Cut (open
+      the hole with a thin slit, area preserved), or Leave as-is (flag only). The
+      chosen method applies to every holed polygon in that run, before the output is
+      written, and fixed features are re-checked — so a polygon whose only problem
+      was a hole becomes READY.
     - Z values are no longer stripped — TRACT accepts them, so Z is preserved end
       to end in the output GeoJSON. X/Y are still truncated to 6 decimals.
     - Master Data templates updated to TRACT's current schema: Reference_ID is now

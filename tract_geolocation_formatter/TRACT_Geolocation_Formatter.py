@@ -1405,10 +1405,110 @@ class TractGeolocationFormatter:
         dialog.exec()
 
 
+    # ---------------------------------------------------------------------
+    # SPEC-fix-holes: optional hole filling / cutting
+    # ---------------------------------------------------------------------
+    def _geometry_has_holes(self, geom):
+        """True if a QgsGeometry polygon/multipolygon has any interior ring."""
+        if geom.isMultipart():
+            for poly in geom.asMultiPolygon():
+                if len(poly) > 1:  # exterior + >=1 interior ring
+                    return True
+            return False
+        poly = geom.asPolygon()
+        return bool(poly) and len(poly) > 1
+
+    def _prompt_hole_fix_policy(self):
+        """Ask once how to handle polygon holes for this run (DEC-H1/H2)."""
+        box = QMessageBox(self.iface.mainWindow())
+        box.setWindowTitle(self.tr("Polygon holes detected"))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(self.tr("Some polygons contain interior holes. How should "
+                            "holes be handled for the whole file?"))
+        box.setInformativeText(self.tr(
+            "Fill — remove the hole (the plot area grows by the hole).\n"
+            "Cut — open the hole with a thin slit (the plot area is preserved).\n"
+            "Leave as-is — keep the hole and flag the feature as NEEDS_FIX."
+        ))
+        fill_btn = box.addButton(self.tr("Fill holes"), QMessageBox.ButtonRole.AcceptRole)
+        cut_btn = box.addButton(self.tr("Cut holes"), QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(self.tr("Leave as-is"), QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is fill_btn:
+            return "fill"
+        if clicked is cut_btn:
+            return "cut"
+        return "flag"
+
+    def _maybe_fix_holes(self, geom, feature):
+        """Fill/cut interior holes per the run policy (SPEC-fix-holes).
+
+        No-op if the geometry has no holes. On the first holed polygon, prompts
+        once and caches the policy for the run. Returns the (possibly fixed)
+        geometry; if the fix cannot resolve the holes, returns it unchanged so the
+        holes stage flags the feature (DEC-H4).
+        """
+        if geom is None or geom.isEmpty() or not self._geometry_has_holes(geom):
+            return geom
+
+        self._hole_stats["with_holes"] += 1
+
+        if self._hole_fix_policy is None:
+            self._hole_fix_policy = self._prompt_hole_fix_policy()
+
+        if self._hole_fix_policy not in ("fill", "cut"):
+            return geom  # "flag" — leave as-is; the holes stage flags it
+
+        from .hole_fixing import fix_holes
+        try:
+            shapely_geom = shape(json.loads(geom.asJson()))
+            new_geom, parts, notes, resolved = fix_holes(shapely_geom, self._hole_fix_policy)
+        except Exception as e:
+            self._log(self.tr("Hole fix failed for feature {0}: {1}").format(feature.id(), e))
+            return geom
+
+        if not resolved:
+            self._hole_stats["flagged"] += 1
+            self._log(self.tr(
+                "Could not {0} holes for feature {1} (left flagged): {2}"
+            ).format(self._hole_fix_policy, feature.id(),
+                     "; ".join(notes) or "unresolved"))
+            return geom
+
+        fixed = QgsGeometry.fromWkt(new_geom.wkt)
+        if fixed is None or fixed.isEmpty():
+            self._hole_stats["flagged"] += 1
+            self._log(self.tr(
+                "Hole fix produced empty geometry for feature {0} (left flagged)."
+            ).format(feature.id()))
+            return geom
+        # Keep output at the mandated 6-decimal precision (constitution §3).
+        fixed = self._truncate_geometry_coordinates(fixed, COORD_DECIMALS)
+        # Guard: if 6-decimal truncation re-closed the slit, keep the original so
+        # the holes stage flags it rather than writing a mangled geometry.
+        if self._geometry_has_holes(fixed):
+            self._hole_stats["flagged"] += 1
+            self._log(self.tr(
+                "Hole fix for feature {0} was lost to coordinate truncation "
+                "(left flagged)."
+            ).format(feature.id()))
+            return geom
+
+        self._hole_stats["fixed"] += 1
+        if self._hole_fix_policy == "cut":
+            self._hole_stats["parts"] += parts
+        return fixed
+
     def _run_transformation_from_dialog(self):
         """Read settings from dialog and run the actual transformation."""
 
         export_blocked = False
+
+        # SPEC-fix-holes: per-run hole-fixing policy (decided once, lazily, at the
+        # first holed polygon) and running stats for the report.
+        self._hole_fix_policy = None  # None (undecided) | "fill" | "cut" | "flag"
+        self._hole_stats = {"with_holes": 0, "fixed": 0, "parts": 0, "flagged": 0}
 
         # Track all feature-level geometry fixes in a structured way
         repair_log = {}  # { feature_id : [ "message1", "message2" ] }
@@ -1921,6 +2021,12 @@ class TractGeolocationFormatter:
                 else:
                     geom = fixed
 
+                # SPEC-fix-holes: optionally fill/cut interior holes here, before
+                # the TRACT checks / area / holes stages, so those re-evaluate the
+                # fixed geometry (a feature whose only problem was a hole ends up
+                # READY). Prompts once per run for the policy; no-op when the
+                # geometry has no holes.
+                geom = self._maybe_fix_holes(geom, f)
 
                 # Final TRACT-style geometry checks after truncation / duplicate cleanup / makeValid
                 tract_errors = self._get_tract_geometry_errors(geom)
@@ -2265,6 +2371,30 @@ class TractGeolocationFormatter:
                         "upload to TRACT.")
                 .format(_plural(needs_fix_count, "feature"))
             )
+
+        # SPEC-fix-holes: summarize hole handling for this run.
+        if self._hole_stats["with_holes"] > 0:
+            report.section(
+                self.tr("POLYGON HOLES ({})").format(self._hole_stats["with_holes"])
+            )
+            handled = self.tr("{0} of {1}").format(
+                self._hole_stats["fixed"], self._hole_stats["with_holes"]
+            )
+            if self._hole_fix_policy == "fill":
+                hole_rows = [(self.tr("Filled — the plot area grows by the hole"), handled)]
+            elif self._hole_fix_policy == "cut":
+                hole_rows = [(self.tr("Cut with a slit — the plot area is preserved"), handled)]
+            else:
+                hole_rows = [(
+                    self.tr("Left as-is and flagged"),
+                    str(self._hole_stats["with_holes"]),
+                )]
+            if self._hole_stats["flagged"] > 0:
+                hole_rows.append((
+                    self.tr("Could not be fixed, left flagged"),
+                    str(self._hole_stats["flagged"]),
+                ))
+            report.rows(hole_rows)
 
         if invalid_features:
             report.section(
