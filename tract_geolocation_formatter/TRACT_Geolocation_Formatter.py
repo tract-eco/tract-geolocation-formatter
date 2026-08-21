@@ -1441,6 +1441,36 @@ class TractGeolocationFormatter:
             return "cut"
         return "flag"
 
+    def _confirm_hole_fix_disclaimer(self, policy):
+        """Require explicit acceptance before altering plot boundaries.
+
+        Fill and cut both change the geometry the user drew, so the consequence
+        is spelled out and has to be accepted. Returns True if the user chose to
+        continue; declining leaves holes untouched.
+        """
+        if policy == "fill":
+            action = self.tr("Filling holes alters the original plot boundary.")
+        else:
+            action = self.tr("Cutting holes open alters the original plot boundary.")
+
+        box = QMessageBox(self.iface.mainWindow())
+        box.setWindowTitle(self.tr("Confirm change to plot boundaries"))
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(action)
+        box.setInformativeText(self.tr(
+            "You are responsible for verifying that the result accurately "
+            "represents the plot, and for retaining the source data.\n\n"
+            "Choose Cancel to leave holes untouched — affected features are "
+            "flagged as NEEDS_FIX instead."
+        ))
+        continue_btn = box.addButton(self.tr("Continue"), QMessageBox.ButtonRole.AcceptRole)
+        cancel_btn = box.addButton(self.tr("Cancel"), QMessageBox.ButtonRole.RejectRole)
+        # Cancel is the default so a stray Enter/Escape never alters boundaries.
+        box.setDefaultButton(cancel_btn)
+        box.setEscapeButton(cancel_btn)
+        box.exec()
+        return box.clickedButton() is continue_btn
+
     def _maybe_fix_holes(self, geom, feature):
         """Fill/cut interior holes per the run policy (SPEC-fix-holes).
 
@@ -1456,6 +1486,16 @@ class TractGeolocationFormatter:
 
         if self._hole_fix_policy is None:
             self._hole_fix_policy = self._prompt_hole_fix_policy()
+            # Fill and cut rewrite the plot boundary, so they need an explicit
+            # acknowledgement. Declining downgrades the run to "flag", leaving
+            # every holed feature untouched.
+            if self._hole_fix_policy in ("fill", "cut") and not self._confirm_hole_fix_disclaimer(
+                self._hole_fix_policy
+            ):
+                self._log(self.tr(
+                    "Hole fixing was not confirmed; holes are left as-is and flagged."
+                ))
+                self._hole_fix_policy = "flag"
 
         if self._hole_fix_policy not in ("fill", "cut"):
             return geom  # "flag" — leave as-is; the holes stage flags it
