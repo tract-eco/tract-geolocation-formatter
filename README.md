@@ -22,7 +22,7 @@ The **TRACT Geolocation Formatter** provides a guided workflow inside QGIS to:
 - Standardize geolocation files into TRACT’s expected GeoJSON structure
 - Reduce back-and-forth between data providers and platform ingestion
 
-Before validation and processing, the plugin **rounds all geometry coordinates to six decimal places**. This precision level aligns with the coordinate format used in the EU TRACES system, helping avoid geometry inconsistencies caused by excessive decimal precision.
+Before validation and processing, the plugin **truncates all geometry X/Y coordinates to six decimal places**. This precision level aligns with the coordinate format used in the EU TRACES system, helping avoid geometry inconsistencies caused by excessive decimal precision. Z (elevation) values are carried through untouched.
 
 The plugin works directly on existing QGIS layers and does **not** require advanced GIS scripting knowledge.
 
@@ -34,12 +34,13 @@ The plugin works directly on existing QGIS layers and does **not** require advan
   - Node ID
   - Plot ID
 - Ensure consistent schema structure across all features
-- Standardize coordinate precision by rounding geometries to six decimal places
+- Standardize coordinate precision by truncating X/Y coordinates to six decimal places
+- Preserve **Z (elevation) values** — TRACT accepts 3D coordinates, so Z is carried from input to output unchanged
 - Validate polygon geometries (e.g. self-intersections, invalid rings)
 - Report approximate latitude/longitude coordinates of detected boundary self-intersections so they can be located and fixed in QGIS
 - Remove consecutive duplicate vertices
 - Repair invalid geometries using makeValid
-- Detect polygons containing interior holes
+- Detect polygons containing interior holes, and **optionally fix them** by filling them in or cutting them open (see [Fixing Polygon Holes](#fixing-polygon-holes-optional))
 - Validate minimum polygon area requirements
 - Automatically reproject geometries to EPSG:4326
 - Identify intersecting or overlapping line segments
@@ -58,6 +59,32 @@ Designed to be:
 - Reproducible
 - Easy to integrate into existing GIS workflows
 
+
+## Fixing Polygon Holes (optional)
+
+Interior holes ("donut" polygons) are a common reason a plot boundary fails TRACT validation. The plugin detects them and, when any are found, asks **once per run** how to handle the whole file:
+
+| Choice | What it does | Effect on plot area |
+|--------|--------------|---------------------|
+| **Fill holes** | Removes the interior ring so the polygon becomes solid | **Grows** by the area of the hole |
+| **Cut holes** | Opens each hole with a thin slit to the nearest point on the outer boundary | **Preserved**, apart from the negligible slit |
+| **Leave as-is** | Keeps the hole and flags the feature as `NEEDS_FIX` | Unchanged |
+
+Because Fill and Cut both rewrite the boundary you supplied, choosing either one brings up a confirmation step:
+
+> Filling holes alters the original plot boundary. You are responsible for verifying that the result accurately represents the plot, and for retaining the source data.
+
+Choosing **Cancel** there leaves every hole untouched for that run, and the affected features are flagged as `NEEDS_FIX` instead. Cancel is the default, so holes are never altered without a deliberate confirmation.
+
+Details worth knowing:
+
+- The choice applies to **every holed polygon in that run** — it is not asked per feature.
+- Holes are fixed **before** the TRACT geometry checks, the minimum-area check and hole detection run, so a feature whose only problem was a hole is re-evaluated and comes out `READY`.
+- If a hole cannot be resolved — or if the fix would be lost to the six-decimal coordinate precision — the original geometry is kept and the feature is flagged, rather than written out mangled.
+- Cutting only ever removes the sliver of area taken by the slit — it never adds area, unlike filling.
+- The summary report shows how many holed features were fixed and how many were left flagged.
+
+
 ## Output Files
 
 The plugin produces up to three outputs (the third is opt-in); a fourth option splits the first output into several files:
@@ -67,9 +94,9 @@ The plugin produces up to three outputs (the third is opt-in); a fourth option s
 This file contains:
 
 - Standardized attributes (NodeID, PlotID)
-- Rounded coordinate precision
+- X/Y coordinates truncated to six decimal places, with any Z values preserved
 - Reprojected geometries (EPSG:4326)
-- Geometry fixes applied where possible
+- Geometry fixes applied where possible, including optional hole filling / cutting
 
 Depending on the detected issues, the output may contain:
 - A fully valid dataset ready for upload, or
@@ -98,7 +125,7 @@ The user picks:
 - Type: **Farms** or **Farmer Groups**
 - Country: a single value applied to every row (selected from TRACT's published country list)
 
-The plugin populates one row per unique NodeID, with the name and Node_ID fields both set to the NodeID, leaving all other template columns untouched. The output preserves the complete TRACT template structure — all sheets, branding, headers, and validation rules — so it can be uploaded to TRACT without any further manual editing.
+The plugin populates one row per unique NodeID, with the name and Node_ID fields both set to the NodeID, leaving all other template columns untouched. The output preserves the TRACT template structure — all sheets, branding and headers — so it can be uploaded to TRACT without any further manual editing. Note that the country drop-down list itself is not carried into the generated file; the selected country is written directly into every row instead, so the drop-down is not needed.
 
 ### Split output (optional)
 
@@ -123,6 +150,7 @@ You cannot request more files than there are unique NodeIDs — a NodeID cannot 
 - Producing a matched pair of geolocation GeoJSON + Master Data XLSX for one-step TRACT upload
 - Splitting a large geolocation dataset into several smaller files so each uploads to TRACT under its size limit
 - Adapting customer-provided geolocation data to the TRACT GeoJSON template
+- Resolving "donut" polygons with interior holes that TRACT would otherwise reject
 - Validating and cleaning polygons prior to deforestation analysis
 - Pre-checking geolocation data for EUDR-related due diligence workflows
 - Identifying geometry issues that could affect land-use change or forest-loss assessments
