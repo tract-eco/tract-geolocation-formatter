@@ -29,6 +29,10 @@ changelog=
     - Cleaner report pop-up: labelled sections with counts, shown in the normal UI
       font with bold headings, and all output paths grouped at the end. Same
       information as before; the CSV validation report is unchanged.
+    - Master Data files are now written without openpyxl, using only the Python
+      standard library. The plugin ships 5.3 MB smaller with no third-party code,
+      and generated files keep everything the template had — including the country
+      drop-down, which was previously lost.
     0.4.0
     - Optional: split the clean GeoJSON output into 2–10 files so large datasets
       upload to TRACT under the size limit. Features sharing a NodeID always stay in

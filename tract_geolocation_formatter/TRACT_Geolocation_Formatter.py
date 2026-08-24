@@ -380,11 +380,9 @@ class _ReportBuilder:
 # ---------------------------------------------------------------------------
 # Master Data XLSX helpers (GH-6)
 #
-# Pure-Python helpers for the optional Master Data XLSX writer. Use openpyxl
-# (vendored at tract_geolocation_formatter/vendor/openpyxl, bootstrapped via
-# __init__.py). Imports are kept lazy inside each function so the plugin's
-# module load doesn't break if the vendor dir is missing — the master-data
-# feature simply surfaces a clear error at use time.
+# Pure-Python helpers for the optional Master Data XLSX writer, built on the
+# plugin's own stdlib XLSX module (.xlsx). Imports are kept lazy inside each
+# function so plugin load never depends on the master-data feature.
 #
 # See:
 #   .specify/specs/archive/GH-6-master-data-csv/plan.md (post-archive)
@@ -516,28 +514,18 @@ def _read_country_list_from_template(template_path):
 
     Both bundled templates carry the same country list — either can be passed.
     """
-    import openpyxl  # lazy import (DEC-10 — vendored via __init__.py bootstrap)
+    from .xlsx import read_column  # lazy import
 
-    wb = openpyxl.load_workbook(template_path, read_only=True, data_only=True)
-    try:
-        ws = wb["4. Country_List"]
-        countries = []
-        for row in ws.iter_rows(min_row=2, min_col=2, max_col=2, values_only=True):
-            value = row[0]
-            if value:
-                countries.append(value)
-        return countries
-    finally:
-        wb.close()
+    return read_column(template_path, "4. Country_List", "B", first_row=2)
 
 
 def _write_master_data_xlsx(template_path, output_path, master_data_type, country, unique_node_ids):
     """Populate a copy of the bundled template with one row per unique NodeID.
 
-    Loads the template into memory, locates the Template sheet by name,
-    writes data rows starting at row 3 into the three columns specified by
-    ``_MASTER_DATA_MAPPING[master_data_type]``, then saves to ``output_path``.
-    Never modifies the template file on disk.
+    Copies the template, writing data rows from row 3 down into the three
+    columns named by ``_MASTER_DATA_MAPPING[master_data_type]``. Every other
+    part of the workbook is copied through untouched. Never modifies the
+    template file on disk.
 
     Args:
         template_path: filesystem path to the bundled template XLSX.
@@ -551,25 +539,19 @@ def _write_master_data_xlsx(template_path, output_path, master_data_type, countr
         KeyError: if ``master_data_type`` is not in ``_MASTER_DATA_MAPPING``
             or if the expected sheet is missing from the template.
     """
-    import openpyxl  # lazy import
+
+    from .xlsx import write_cells  # lazy import
 
     mapping = _MASTER_DATA_MAPPING[master_data_type]
-    wb = openpyxl.load_workbook(template_path)
-    try:
-        ws = wb[mapping["sheet_name"]]
-        name_col = mapping["name_col"]
-        country_col = mapping["country_col"]
-        node_id_col = mapping["node_id_col"]
 
-        for offset, node_id in enumerate(unique_node_ids):
-            row = 3 + offset
-            ws[f"{name_col}{row}"] = node_id
-            ws[f"{country_col}{row}"] = country
-            ws[f"{node_id_col}{row}"] = node_id
+    values = {}
+    for offset, node_id in enumerate(unique_node_ids):
+        row = 3 + offset
+        values[(row, mapping["name_col"])] = node_id
+        values[(row, mapping["country_col"])] = country
+        values[(row, mapping["node_id_col"])] = node_id
 
-        wb.save(output_path)
-    finally:
-        wb.close()
+    write_cells(template_path, output_path, mapping["sheet_name"], values)
 
 
 class TractGeolocationFormatter:
@@ -855,7 +837,7 @@ class TractGeolocationFormatter:
 
         The country list is cached on first call. Subsequent calls clear and
         re-populate the combo so successive dialog opens are idempotent. On
-        failure (e.g. openpyxl missing or template file missing), the combo
+        failure (e.g. an unreadable or missing template file), the combo
         is populated with only the sentinel placeholder — DEC-12's validator
         will block any later attempt to use the master-data feature.
         """

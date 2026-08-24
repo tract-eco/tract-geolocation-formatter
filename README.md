@@ -125,7 +125,7 @@ The user picks:
 - Type: **Farms** or **Farmer Groups**
 - Country: a single value applied to every row (selected from TRACT's published country list)
 
-The plugin populates one row per unique NodeID, with the name and Node_ID fields both set to the NodeID, leaving all other template columns untouched. The output preserves the TRACT template structure — all sheets, branding and headers — so it can be uploaded to TRACT without any further manual editing. Note that the country drop-down list itself is not carried into the generated file; the selected country is written directly into every row instead, so the drop-down is not needed.
+The plugin populates one row per unique NodeID, with the name and Node_ID fields both set to the NodeID, leaving all other template columns untouched. Only those cells are rewritten — every other part of the workbook is copied through byte-for-byte, so all sheets, branding, headers, data validations and the country drop-down survive intact, and the file can be uploaded to TRACT without any further manual editing.
 
 ### Split output (optional)
 

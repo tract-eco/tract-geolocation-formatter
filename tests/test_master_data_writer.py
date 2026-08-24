@@ -7,24 +7,24 @@ Tests the pure-Python module-level helpers in TRACT_Geolocation_Formatter:
 - _read_country_list_from_template
 - _write_master_data_xlsx
 
-Requires openpyxl. The plugin's vendored copy bootstraps via __init__.py
-(GH-6 Task 1) — importing tract_geolocation_formatter first puts vendor/ on
-sys.path, then openpyxl resolves. The main module additionally requires
-qgis.PyQt to be importable. Tests skip gracefully if any import fails
-(same pattern as test_self_intersection_coordinates.py and
-test_build_expression_value.py).
+Output is verified with the plugin's own stdlib XLSX reader
+(tract_geolocation_formatter.xlsx), which replaced the vendored openpyxl — so
+these tests need no third-party packages. The reader itself is covered
+independently by tests/test_xlsx.py.
+
+Importing the main module still requires qgis.PyQt; tests skip gracefully if it
+is unavailable (same pattern as test_self_intersection_coordinates.py).
 """
 
 import hashlib
 import os
+import shutil
 import tempfile
 import unittest
 
+from tract_geolocation_formatter.xlsx import read_cells, read_column, sheet_names
+
 try:
-    # Importing the plugin package first triggers __init__.py's vendor
-    # bootstrap so openpyxl resolves from the vendored copy.
-    import tract_geolocation_formatter  # noqa: F401
-    import openpyxl
     from tract_geolocation_formatter.TRACT_Geolocation_Formatter import (
         _MASTER_DATA_MAPPING,
         _master_data_output_path,
@@ -37,7 +37,6 @@ except ImportError:
     HELPERS_AVAILABLE = False
 
 
-# Bundled template paths (post-Task 1 location)
 _PLUGIN_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "tract_geolocation_formatter",
@@ -45,6 +44,16 @@ _PLUGIN_DIR = os.path.join(
 _TEMPLATES_DIR = os.path.join(_PLUGIN_DIR, "templates")
 _FARMS_TEMPLATE = os.path.join(_TEMPLATES_DIR, "farms_master_data_template.xlsx")
 _FARMER_GROUPS_TEMPLATE = os.path.join(_TEMPLATES_DIR, "farmer_group_master_data_template.xlsx")
+
+_EXPECTED_FARMS_SHEETS = [
+    "0. Introduction",
+    "1. ReadMe",
+    "2.Farms_Template",
+    ">>>",
+    "3.Farms_Sample data",
+    "4. Country_List",
+    "Config",
+]
 
 
 def _sha256(path):
@@ -56,7 +65,7 @@ def _sha256(path):
     return h.hexdigest()
 
 
-@unittest.skipUnless(HELPERS_AVAILABLE, "Requires openpyxl (vendored via Task 1)")
+@unittest.skipUnless(HELPERS_AVAILABLE, "Requires qgis.PyQt to import the plugin module")
 class TestMasterDataOutputPath(unittest.TestCase):
     """Pure string manipulation — no filesystem touch."""
 
@@ -80,7 +89,7 @@ class TestMasterDataOutputPath(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(HELPERS_AVAILABLE, "Requires openpyxl (vendored via Task 1)")
+@unittest.skipUnless(HELPERS_AVAILABLE, "Requires qgis.PyQt to import the plugin module")
 class TestMasterDataCellMapping(unittest.TestCase):
     """Confirm _MASTER_DATA_MAPPING matches the actual template column layout."""
 
@@ -91,46 +100,32 @@ class TestMasterDataCellMapping(unittest.TestCase):
         self.assertEqual(mapping["country_col"], "E")
         self.assertEqual(mapping["node_id_col"], "I")
 
-        wb = openpyxl.load_workbook(_FARMS_TEMPLATE, read_only=True, data_only=True)
-        try:
-            self.assertIn(mapping["sheet_name"], wb.sheetnames)
-            ws = wb[mapping["sheet_name"]]
-            row2 = {
-                cell.column_letter: cell.value
-                for cell in next(ws.iter_rows(min_row=2, max_row=2))
-            }
-            self.assertEqual(row2[mapping["name_col"]], "Farm Name")
-            self.assertEqual(row2[mapping["country_col"]], "Country")
-            self.assertEqual(row2[mapping["node_id_col"]], "Node_ID")
-        finally:
-            wb.close()
+        self.assertIn(mapping["sheet_name"], sheet_names(_FARMS_TEMPLATE))
+        headers = read_cells(
+            _FARMS_TEMPLATE,
+            mapping["sheet_name"],
+            ("%s2" % mapping["name_col"],
+             "%s2" % mapping["country_col"],
+             "%s2" % mapping["node_id_col"]),
+        )
+        self.assertEqual(headers["%s2" % mapping["name_col"]], "Farm Name")
+        self.assertEqual(headers["%s2" % mapping["country_col"]], "Country")
+        self.assertEqual(headers["%s2" % mapping["node_id_col"]], "Node_ID")
 
     def test_farms_template_has_no_geojson_column(self):
         """TRACT dropped the GeoJson column — the bundled template must match."""
-        wb = openpyxl.load_workbook(_FARMS_TEMPLATE, read_only=True, data_only=True)
-        try:
-            for sheet_name in ("2.Farms_Template", "3.Farms_Sample data"):
-                ws = wb[sheet_name]
-                headers = [
-                    cell.value
-                    for cell in next(ws.iter_rows(min_row=2, max_row=2))
-                    if cell.value is not None
-                ]
-                self.assertNotIn("GeoJson", headers, sheet_name)
-                self.assertIn("Node_ID", headers, sheet_name)
-                self.assertEqual(headers[-1], "Node_ID", sheet_name)
-        finally:
-            wb.close()
+        for sheet_name in ("2.Farms_Template", "3.Farms_Sample data"):
+            cells = read_cells(_FARMS_TEMPLATE, sheet_name, ("I2", "J2"))
+            self.assertEqual(cells["I2"], "Node_ID", sheet_name)
+            self.assertEqual(cells["J2"], "", sheet_name)
 
     def test_farms_entry_sheet_ships_empty(self):
         """No leftover sample/test data in the data-entry sheet's first row."""
-        wb = openpyxl.load_workbook(_FARMS_TEMPLATE, read_only=True, data_only=True)
-        try:
-            ws = wb["2.Farms_Template"]
-            row3 = next(ws.iter_rows(min_row=3, max_row=3))
-            self.assertEqual([c.value for c in row3 if c.value is not None], [])
-        finally:
-            wb.close()
+        row3 = read_cells(
+            _FARMS_TEMPLATE, "2.Farms_Template",
+            tuple("%s3" % c for c in "ABCDEFGHI"),
+        )
+        self.assertEqual({k: v for k, v in row3.items() if v}, {})
 
     def test_farmer_groups_mapping_matches_template(self):
         mapping = _MASTER_DATA_MAPPING["farmer_groups"]
@@ -139,22 +134,20 @@ class TestMasterDataCellMapping(unittest.TestCase):
         self.assertEqual(mapping["country_col"], "C")
         self.assertEqual(mapping["node_id_col"], "G")
 
-        wb = openpyxl.load_workbook(_FARMER_GROUPS_TEMPLATE, read_only=True, data_only=True)
-        try:
-            self.assertIn(mapping["sheet_name"], wb.sheetnames)
-            ws = wb[mapping["sheet_name"]]
-            row2 = {
-                cell.column_letter: cell.value
-                for cell in next(ws.iter_rows(min_row=2, max_row=2))
-            }
-            self.assertEqual(row2[mapping["name_col"]], "Farmer_Group_Name")
-            self.assertEqual(row2[mapping["country_col"]], "Country")
-            self.assertEqual(row2[mapping["node_id_col"]], "Node_ID")
-        finally:
-            wb.close()
+        self.assertIn(mapping["sheet_name"], sheet_names(_FARMER_GROUPS_TEMPLATE))
+        headers = read_cells(
+            _FARMER_GROUPS_TEMPLATE,
+            mapping["sheet_name"],
+            ("%s2" % mapping["name_col"],
+             "%s2" % mapping["country_col"],
+             "%s2" % mapping["node_id_col"]),
+        )
+        self.assertEqual(headers["%s2" % mapping["name_col"]], "Farmer_Group_Name")
+        self.assertEqual(headers["%s2" % mapping["country_col"]], "Country")
+        self.assertEqual(headers["%s2" % mapping["node_id_col"]], "Node_ID")
 
 
-@unittest.skipUnless(HELPERS_AVAILABLE, "Requires openpyxl (vendored via Task 1)")
+@unittest.skipUnless(HELPERS_AVAILABLE, "Requires qgis.PyQt to import the plugin module")
 class TestReadCountryList(unittest.TestCase):
     """AC-5 unit-level: 250 countries in TRACT order, first Afghanistan, last Zimbabwe."""
 
@@ -171,107 +164,90 @@ class TestReadCountryList(unittest.TestCase):
         self.assertEqual(farms_list, fg_list)
 
 
-@unittest.skipUnless(HELPERS_AVAILABLE, "Requires openpyxl (vendored via Task 1)")
+@unittest.skipUnless(HELPERS_AVAILABLE, "Requires qgis.PyQt to import the plugin module")
 class TestWriteMasterDataXlsx(unittest.TestCase):
-    """Integration tests for the writer — read back the produced file with openpyxl."""
+    """Integration tests for the writer — read the produced file back."""
 
-    def _write_and_open(self, master_data_type, country, unique_node_ids):
-        """Write to a temp path, open with openpyxl, return (path, workbook).
+    def setUp(self):
+        self._dir = tempfile.mkdtemp()
+        self.output_path = os.path.join(self._dir, "out.xlsx")
 
-        Caller is responsible for closing the workbook and deleting the path.
-        """
+    def tearDown(self):
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+    def _write(self, master_data_type, country, unique_node_ids):
         template = _FARMS_TEMPLATE if master_data_type == "farms" else _FARMER_GROUPS_TEMPLATE
-        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
-            output_path = f.name
-        try:
-            _write_master_data_xlsx(template, output_path, master_data_type, country, unique_node_ids)
-            wb = openpyxl.load_workbook(output_path, data_only=True)
-            return output_path, wb
-        except Exception:
-            os.unlink(output_path)
-            raise
+        _write_master_data_xlsx(
+            template, self.output_path, master_data_type, country, unique_node_ids
+        )
+        return _MASTER_DATA_MAPPING[master_data_type]["sheet_name"]
 
     def test_write_farms_single_node(self):
         """AC-2: single unique NodeID → one data row at row 3 in B/E/I."""
-        path, wb = self._write_and_open("farms", "Brazil", ["NODE_001"])
-        try:
-            ws = wb["2.Farms_Template"]
-            self.assertEqual(ws["B3"].value, "NODE_001")
-            self.assertEqual(ws["E3"].value, "Brazil")
-            self.assertEqual(ws["I3"].value, "NODE_001")
-            # Row 4 entirely empty (only 1 row written)
-            self.assertIsNone(ws["B4"].value)
-            self.assertIsNone(ws["E4"].value)
-            self.assertIsNone(ws["I4"].value)
-        finally:
-            wb.close()
-            os.unlink(path)
+        sheet = self._write("farms", "Brazil", ["NODE_001"])
+        cells = read_cells(self.output_path, sheet,
+                           ("B3", "E3", "I3", "B4", "E4", "I4"))
+        self.assertEqual((cells["B3"], cells["E3"], cells["I3"]),
+                         ("NODE_001", "Brazil", "NODE_001"))
+        # Row 4 entirely empty (only 1 row written)
+        self.assertEqual((cells["B4"], cells["E4"], cells["I4"]), ("", "", ""))
 
     def test_write_farms_multiple_nodes_order_preserved(self):
-        """AC-6: caller passes already-deduped list; writer preserves order."""
-        path, wb = self._write_and_open("farms", "Colombia", ["A", "B", "C"])
-        try:
-            ws = wb["2.Farms_Template"]
-            self.assertEqual(ws["B3"].value, "A")
-            self.assertEqual(ws["B4"].value, "B")
-            self.assertEqual(ws["B5"].value, "C")
-            # Country same on all 3 rows; Node_ID equals Farm Name on every row
-            for r in (3, 4, 5):
-                self.assertEqual(ws[f"E{r}"].value, "Colombia")
-                self.assertEqual(ws[f"I{r}"].value, ws[f"B{r}"].value)
-            # Row 6 empty
-            self.assertIsNone(ws["B6"].value)
-        finally:
-            wb.close()
-            os.unlink(path)
+        """AC-6: caller passes an already-deduped list; writer preserves order."""
+        sheet = self._write("farms", "Colombia", ["A", "B", "C"])
+        cells = read_cells(self.output_path, sheet,
+                           ("B3", "B4", "B5", "B6", "E3", "E4", "E5", "I3", "I4", "I5"))
+        self.assertEqual([cells["B3"], cells["B4"], cells["B5"]], ["A", "B", "C"])
+        # Country same on all 3 rows; Node_ID equals Farm Name on every row
+        for row in (3, 4, 5):
+            self.assertEqual(cells["E%d" % row], "Colombia")
+            self.assertEqual(cells["I%d" % row], cells["B%d" % row])
+        self.assertEqual(cells["B6"], "")
 
     def test_write_farmer_groups_cell_positions(self):
         """AC-3: farmer-groups uses columns A/C/G, not B/E/I."""
-        path, wb = self._write_and_open("farmer_groups", "Côte d'Ivoire", ["GRP_1", "GRP_2"])
-        try:
-            ws = wb["2. Farmer_Groups Template"]
-            self.assertEqual(ws["A3"].value, "GRP_1")
-            self.assertEqual(ws["C3"].value, "Côte d'Ivoire")
-            self.assertEqual(ws["G3"].value, "GRP_1")
-            self.assertEqual(ws["A4"].value, "GRP_2")
-            self.assertEqual(ws["C4"].value, "Côte d'Ivoire")
-            self.assertEqual(ws["G4"].value, "GRP_2")
-            # B/E/I are NOT the farmer-groups columns — must be empty
-            self.assertIsNone(ws["B3"].value)
-            self.assertIsNone(ws["E3"].value)
-            self.assertIsNone(ws["I3"].value)
-        finally:
-            wb.close()
-            os.unlink(path)
+        sheet = self._write("farmer_groups", "Côte d'Ivoire", ["GRP_1", "GRP_2"])
+        cells = read_cells(self.output_path, sheet,
+                           ("A3", "C3", "G3", "A4", "C4", "G4", "B3", "E3", "I3"))
+        self.assertEqual((cells["A3"], cells["C3"], cells["G3"]),
+                         ("GRP_1", "Côte d'Ivoire", "GRP_1"))
+        self.assertEqual((cells["A4"], cells["C4"], cells["G4"]),
+                         ("GRP_2", "Côte d'Ivoire", "GRP_2"))
+        # B/E/I are NOT the farmer-groups columns — must stay empty
+        self.assertEqual((cells["B3"], cells["E3"], cells["I3"]), ("", "", ""))
+
+    def test_write_more_rows_than_the_template_has(self):
+        """The farmer-groups sheet only ships rows 1-6; extra rows are created."""
+        ids = ["G%d" % n for n in range(1, 11)]
+        sheet = self._write("farmer_groups", "Ghana", ids)
+        cells = read_cells(self.output_path, sheet, ("A7", "G7", "A12", "C12", "G12"))
+        self.assertEqual((cells["A7"], cells["G7"]), ("G5", "G5"))
+        self.assertEqual((cells["A12"], cells["C12"], cells["G12"]),
+                         ("G10", "Ghana", "G10"))
 
     def test_write_preserves_all_sheets(self):
-        """AC-4: all 7 sheets present in the output, names byte-identical to the template."""
-        path, wb = self._write_and_open("farms", "Brazil", ["NODE"])
-        try:
-            expected_sheets = [
-                "0. Introduction",
-                "1. ReadMe",
-                "2.Farms_Template",
-                ">>>",
-                "3.Farms_Sample data",
-                "4. Country_List",
-                "Config",
-            ]
-            self.assertEqual(wb.sheetnames, expected_sheets)
-        finally:
-            wb.close()
-            os.unlink(path)
+        """AC-4: all 7 sheets present in the output, names byte-identical."""
+        self._write("farms", "Brazil", ["NODE"])
+        self.assertEqual(sheet_names(self.output_path), _EXPECTED_FARMS_SHEETS)
+
+    def test_write_preserves_country_list(self):
+        """The country list must survive, since the dialog reads it back."""
+        self._write("farms", "Brazil", ["NODE"])
+        countries = read_column(self.output_path, "4. Country_List", "B", first_row=2)
+        self.assertEqual(len(countries), 250)
+        self.assertEqual(countries[0], "Afghanistan")
 
     def test_write_does_not_modify_template_on_disk(self):
         """The bundled template file is byte-identical before and after a write."""
         before = _sha256(_FARMS_TEMPLATE)
-        path, wb = self._write_and_open("farms", "Brazil", ["NODE_X"])
-        try:
-            wb.close()
-        finally:
-            os.unlink(path)
-        after = _sha256(_FARMS_TEMPLATE)
-        self.assertEqual(before, after)
+        self._write("farms", "Brazil", ["NODE_X"])
+        self.assertEqual(_sha256(_FARMS_TEMPLATE), before)
+
+    def test_unknown_master_data_type_raises(self):
+        with self.assertRaises(KeyError):
+            _write_master_data_xlsx(
+                _FARMS_TEMPLATE, self.output_path, "not_a_type", "Brazil", ["N"]
+            )
 
 
 if __name__ == "__main__":
