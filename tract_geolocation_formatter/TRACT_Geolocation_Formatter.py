@@ -55,6 +55,7 @@ from qgis.core import (
     QgsGeometry,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
+    QgsCsException,
     Qgis,
     QgsVectorLayer
 )
@@ -804,7 +805,9 @@ class TractGeolocationFormatter:
         # When user changes layer, refresh combos AND defaults
         try:
             self.dlg.layerComboBox.currentIndexChanged.disconnect()
-        except Exception:
+        except TypeError:
+            # PyQt raises TypeError when the signal has no connections yet,
+            # which is the normal case the first time through.
             pass
 
         self.dlg.layerComboBox.currentIndexChanged.connect(self._on_layer_changed)
@@ -2145,7 +2148,11 @@ class TractGeolocationFormatter:
                                 part_area_geom.transform(area_transform)
                                 part_area_m2 = part_area_geom.area()
                                 part_area_ha = part_area_m2 / 10000.0
-                            except Exception:
+                            except QgsCsException:
+                                # This part could not be reprojected to the
+                                # equal-area CRS, so its area is unknowable.
+                                # The whole-geometry area check above already
+                                # reports that failure, so skip just this part.
                                 continue
 
                             if part_area_ha < MIN_PLOT_AREA_HA:
@@ -2633,7 +2640,9 @@ class TractGeolocationFormatter:
                 try:
                     if output_layer is not None and output_layer.isValid():
                         QgsProject.instance().removeMapLayer(output_layer.id())
-                except Exception:
+                except RuntimeError:
+                    # The layer's underlying C++ object is already gone (e.g. the
+                    # user removed it by hand), so there is nothing left to remove.
                     pass
                 try:
                     os.remove(output_path)
