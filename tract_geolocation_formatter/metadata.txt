@@ -18,6 +18,10 @@ hasProcessingProvider=no
 
 changelog=
     0.5.0
+    - Optional fixing of polygon holes. When holes are found you choose once per
+      run: Fill (area grows), Cut a thin slit (area preserved), or Leave as-is
+      (flagged). Fill and Cut ask you to confirm, as they alter the plot boundary.
+      Fixed features are re-checked, so a hole-only problem becomes READY.
     - Z values are no longer stripped — TRACT accepts them, so Z is preserved end
       to end in the output GeoJSON. X/Y are still truncated to 6 decimals.
     - Master Data templates updated to TRACT's current schema: Reference_ID is now
