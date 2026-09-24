@@ -61,13 +61,31 @@ from qgis.core import (
 )
 
 # Version-safe string field type for QgsField construction.
-# QGIS 4 / Qt6 uses QMetaType; QGIS 3.x / Qt5 uses QVariant.
-try:
-    from qgis.PyQt.QtCore import QMetaType
-    STRING_FIELD_TYPE = QMetaType.Type.QString
-except (ImportError, AttributeError):
+#
+# QGIS >= 3.38 accepts QMetaType.Type in the QgsField constructor; QGIS <= 3.36
+# only accepts QVariant.Type. A plain `import QMetaType` probe is NOT enough to
+# tell them apart: PyQt5 also exposes QMetaType.Type.QString (it resolves to 10
+# under Qt 5.15), so on QGIS 3.36 the import succeeds and QgsField then raises
+# "argument 2 has unexpected type 'Type'". Probe the constructor instead.
+def _resolve_string_field_type():
+    try:
+        from qgis.PyQt.QtCore import QMetaType
+        candidate = QMetaType.Type.QString
+    except (ImportError, AttributeError):
+        candidate = None
+
+    if candidate is not None:
+        try:
+            QgsField("_probe", candidate)
+            return candidate
+        except TypeError:
+            pass  # QGIS < 3.38: constructor predates the QMetaType overload
+
     from qgis.PyQt.QtCore import QVariant as _QVariant
-    STRING_FIELD_TYPE = _QVariant.String
+    return _QVariant.String
+
+
+STRING_FIELD_TYPE = _resolve_string_field_type()
 
 from .TRACT_Geolocation_Formatter_dialog import TractGeolocationFormatterDialog
 

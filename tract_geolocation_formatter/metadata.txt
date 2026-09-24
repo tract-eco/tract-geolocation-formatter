@@ -3,7 +3,7 @@ name=TRACT Geolocation Formatter
 qgisMinimumVersion=3.0
 qgisMaximumVersion=4.99
 description=Validate, clean, and convert geolocation layers into the TRACT GeoJSON template for sustainability and traceability workflows.
-version=0.5.0
+version=0.5.1
 author=Luis Carrasco
 email=luiscartor@gmail.com
 
@@ -17,6 +17,13 @@ homepage=https://github.com/tract-eco/tract-geolocation-formatter
 hasProcessingProvider=no
 
 changelog=
+    0.5.1
+    - Fixed a crash on load for QGIS 3.36 and earlier: "TypeError: QgsField():
+      arguments did not match any overloaded call". The version-safe string field
+      type added in 0.3.0 always resolved to QMetaType, because PyQt5 exposes
+      QMetaType.Type.QString too — but QgsField only accepts it from QGIS 3.38 on.
+      The type is now chosen by probing the constructor, so 3.0–3.36 fall back to
+      QVariant.String and 3.38+ / QGIS 4 keep using QMetaType.
     0.5.0
     - Optional fixing of polygon holes. When holes are found you choose once per
       run: Fill (area grows), Cut a thin slit (area preserved), or Leave as-is
