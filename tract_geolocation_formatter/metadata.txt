@@ -1,6 +1,6 @@
 [general]
 name=TRACT Geolocation Formatter
-qgisMinimumVersion=3.0
+qgisMinimumVersion=3.38
 qgisMaximumVersion=4.99
 description=Validate, clean, and convert geolocation layers into the TRACT GeoJSON template for sustainability and traceability workflows.
 version=0.5.1
@@ -24,6 +24,13 @@ changelog=
       QMetaType.Type.QString too — but QgsField only accepts it from QGIS 3.38 on.
       The type is now chosen by probing the constructor, so 3.0–3.36 fall back to
       QVariant.String and 3.38+ / QGIS 4 keep using QMetaType.
+    - All QGIS enums are now accessed in their scoped form (Qgis.MessageLevel.Info,
+      QgsWkbTypes.GeometryType.PolygonGeometry, QgsMapLayer.LayerType.VectorLayer,
+      QgsVectorFileWriter.WriterError.NoError), as required by the QGIS plugin
+      repository's Qt6 compatibility check.
+    - Minimum QGIS version raised from 3.0 to 3.38. The scoped enum forms and the
+      QMetaType-based QgsField constructor are both verified on 3.38 and 4.0.3;
+      earlier 3.x releases are no longer supported.
     0.5.0
     - Optional fixing of polygon holes. When holes are found you choose once per
       run: Fill (area grows), Cut a thin slit (area preserved), or Leave as-is

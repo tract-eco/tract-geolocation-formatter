@@ -755,9 +755,9 @@ class TractGeolocationFormatter:
         """Return list of polygon/multipolygon QgsVectorLayers in the project."""
         layers = []
         for layer in QgsProject.instance().mapLayers().values():
-            if layer.type() != QgsMapLayer.VectorLayer:
+            if layer.type() != QgsMapLayer.LayerType.VectorLayer:
                 continue
-            if layer.geometryType() == QgsWkbTypes.PolygonGeometry:
+            if layer.geometryType() == QgsWkbTypes.GeometryType.PolygonGeometry:
                 layers.append(layer)
         return layers
 
@@ -1215,7 +1215,7 @@ class TractGeolocationFormatter:
         geom_type = QgsWkbTypes.geometryType(wkb_type)
 
         # Already polygonal
-        if geom_type == QgsWkbTypes.PolygonGeometry:
+        if geom_type == QgsWkbTypes.GeometryType.PolygonGeometry:
             return geom
 
         # Try to extract polygon parts from geometry collections
@@ -1223,7 +1223,7 @@ class TractGeolocationFormatter:
         try:
             for part in geom.constParts():
                 part_geom = QgsGeometry(part.clone())
-                if QgsWkbTypes.geometryType(part_geom.wkbType()) == QgsWkbTypes.PolygonGeometry:
+                if QgsWkbTypes.geometryType(part_geom.wkbType()) == QgsWkbTypes.GeometryType.PolygonGeometry:
                     parts.append(part_geom)
         except Exception:
             return QgsGeometry()
@@ -1359,7 +1359,7 @@ class TractGeolocationFormatter:
             errors.append("Empty geometry")
             return errors
 
-        if QgsWkbTypes.geometryType(geom.wkbType()) != QgsWkbTypes.PolygonGeometry:
+        if QgsWkbTypes.geometryType(geom.wkbType()) != QgsWkbTypes.GeometryType.PolygonGeometry:
             errors.append("Geometry is not polygonal")
             return errors
 
@@ -1575,7 +1575,7 @@ class TractGeolocationFormatter:
         layer = self._polygon_layers[idx]
 
         if layer.geometryType() not in (
-            QgsWkbTypes.PolygonGeometry,
+            QgsWkbTypes.GeometryType.PolygonGeometry,
         ):
             QMessageBox.warning(
                 self.iface.mainWindow(),
@@ -1812,7 +1812,7 @@ class TractGeolocationFormatter:
             save_options
         )
 
-        if writer.hasError() != QgsVectorFileWriter.NoError:
+        if writer.hasError() != QgsVectorFileWriter.WriterError.NoError:
             QMessageBox.critical(
                 self.iface.mainWindow(),
                 self.tr("TRACT Geolocation Formatter"),
@@ -1848,7 +1848,7 @@ class TractGeolocationFormatter:
         progress.setFormat("%v / %m")
         progress.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         progress_message.layout().addWidget(progress)
-        progress_item = self.iface.messageBar().pushWidget(progress_message, Qgis.Info)
+        progress_item = self.iface.messageBar().pushWidget(progress_message, Qgis.MessageLevel.Info)
 
         try:
             for i, f in enumerate(features, start=1):
@@ -2318,14 +2318,14 @@ class TractGeolocationFormatter:
             self.iface.messageBar().pushMessage(
                 "TRACT Geolocation Formatter",
                 "Output file created but could not be loaded into QGIS.",
-                level=Qgis.Warning,
+                level=Qgis.MessageLevel.Warning,
                 duration=5
             )
 
         self.iface.messageBar().pushMessage(
             "TRACT Geolocation Formatter",
             f"Finished processing {total_count} features.",
-            level=Qgis.Success,
+            level=Qgis.MessageLevel.Success,
             duration=3
         )
 
@@ -2631,7 +2631,7 @@ class TractGeolocationFormatter:
                         self.iface.messageBar().pushMessage(
                             "TRACT Geolocation Formatter",
                             f"Split file created but could not be loaded: {path}",
-                            level=Qgis.Warning,
+                            level=Qgis.MessageLevel.Warning,
                             duration=5,
                         )
 
