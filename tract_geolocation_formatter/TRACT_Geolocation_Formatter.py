@@ -93,6 +93,9 @@ from .TRACT_Geolocation_Formatter_dialog import TractGeolocationFormatterDialog
 MIN_PLOT_AREA_HA = 0.001
 AREA_CRS = QgsCoordinateReferenceSystem("EPSG:6933")  # Equal-area CRS
 COORD_DECIMALS = 6
+# GH-12 DEC-6: a clip/dissolve may leave this much overlap (% of the smaller
+# plot) after 6-decimal truncation and still be accepted by the post-fix guard.
+OVERLAP_RESIDUAL_TOLERANCE_PCT = 0.1
 
 # TRACT output field names — used to detect clashes with input layer fields
 TRACT_FIELD_NAMES = {"NodeID", "PlotID", "TRACTStatus", "TRACTIssue"}
@@ -732,6 +735,8 @@ class TractGeolocationFormatter:
             self.dlg.masterDataCheckBox.toggled.connect(self._update_master_data_ui_state)
             # Connect Split-output checkbox (GH-8)
             self.dlg.splitCheckBox.toggled.connect(self._update_split_ui_state)
+            # Connect Overlap-check checkbox (GH-12)
+            self.dlg.overlapCheckBox.toggled.connect(self._update_overlap_ui_state)
 
         # Populate dialog every time (layers, fields, defaults)
         self._populate_dialog()
@@ -823,11 +828,16 @@ class TractGeolocationFormatter:
         self.dlg.splitCheckBox.setChecked(False)
         self.dlg.splitCountSpin.setValue(2)
 
+        # Overlap-check defaults (GH-12) — on, 1 % of the smaller plot.
+        self.dlg.overlapCheckBox.setChecked(True)
+        self.dlg.overlapThresholdSpin.setValue(1.0)
+
         # Enable/disable state is refreshed when dialog opens
         self._update_nodeid_ui_state()
         self._update_plotid_ui_state()
         self._update_master_data_ui_state()
         self._update_split_ui_state()
+        self._update_overlap_ui_state()
 
     def _update_nodeid_ui_state(self):
         """Enable only the relevant NodeID input widget."""
@@ -849,6 +859,10 @@ class TractGeolocationFormatter:
     def _update_split_ui_state(self):
         """Enable the split controls only when the checkbox is ticked (GH-8)."""
         self.dlg.splitContainer.setEnabled(self.dlg.splitCheckBox.isChecked())
+
+    def _update_overlap_ui_state(self):
+        """Enable the overlap threshold only when the check is ticked (GH-12)."""
+        self.dlg.overlapContainer.setEnabled(self.dlg.overlapCheckBox.isChecked())
 
     def _populate_country_combo(self):
         """Populate the country dropdown from the bundled TRACT template (GH-6, DEC-3, DEC-9).
@@ -1543,6 +1557,632 @@ class TractGeolocationFormatter:
             self._hole_stats["parts"] += parts
         return fixed
 
+    # ------------------------------------------------------------------ #
+    # GH-12 overlap helpers
+    # ------------------------------------------------------------------ #
+
+    def _area_m2(self, geom):
+        """Area in m² of an EPSG:4326 QgsGeometry, via AREA_CRS (run transform)."""
+        g = QgsGeometry(geom)
+        g.transform(self._area_transform)
+        return g.area()
+
+    def _shapely_area_m2(self, sg):
+        """``area_fn`` for overlaps.py: m² of a Shapely geometry in EPSG:4326."""
+        if sg.is_empty:
+            return 0.0
+        return self._area_m2(QgsGeometry.fromWkt(sg.wkt))
+
+    def _repair_parts_individually(self, geom, feature):
+        """makeValid() each invalid part of a MultiPolygon on its own (GH-12 DEC-2).
+
+        Whole-geometry makeValid() removes the area where parts overlap; repairing
+        part by part keeps it so the overlap can be found and dissolved. Valid
+        parts are untouched.
+
+        Returns ``(geometry, origin)``: ``origin[k]`` is the 1-based number of
+        the input part that output part ``k`` came from (a repaired bowtie
+        becomes two parts with the same origin). The input geometry is returned
+        unchanged if no part was invalid.
+        """
+        parts = [QgsGeometry(part.clone()) for part in geom.constParts()]
+        if all(part.isGeosValid() for part in parts):
+            return geom, list(range(1, len(parts) + 1))
+
+        rings = []
+        origin = []
+        for n, part in enumerate(parts, start=1):
+            if not part.isGeosValid():
+                part = self._extract_polygonal_geometry(part.makeValid())
+                if part.isEmpty():
+                    self._log(self.tr(
+                        "Feature {0}: polygon part {1} could not be repaired and was dropped "
+                        "before the overlap check."
+                    ).format(feature.id(), n))
+                    continue
+                self._log(self.tr(
+                    "Feature {0}: repaired polygon part {1} before the overlap check."
+                ).format(feature.id(), n))
+            part_rings = self._polygon_rings_with_z(part)
+            if part_rings:
+                rings.extend(part_rings)
+                origin.extend([n] * len(part_rings))
+
+        if not rings:
+            return geom, list(range(1, len(parts) + 1))
+        return self._build_polygon_geometry(rings, True), origin
+
+    def _guard_overlap_fix(self, shapely_geom, against=None):
+        """Post-fix guard (GH-12 FR-8). Returns ``(QgsGeometry | None, reason)``.
+
+        Truncates to COORD_DECIMALS and keeps the polygonal part. Rejects the
+        result (``None``) if it is empty, not GEOS-valid, or still overlaps
+        ``against`` (a Shapely geometry, or a list of them for a plot clipped
+        by several partners) by OVERLAP_RESIDUAL_TOLERANCE_PCT or more.
+        """
+        from .overlaps import residual_overlap_pct
+
+        if shapely_geom is None or shapely_geom.is_empty:
+            return None, "empty result"
+        fixed = QgsGeometry.fromWkt(shapely_geom.wkt)
+        if fixed is None or fixed.isEmpty():
+            return None, "empty result"
+        fixed = self._truncate_geometry_coordinates(fixed, COORD_DECIMALS)
+        fixed = self._extract_polygonal_geometry(fixed)
+        if fixed.isEmpty():
+            return None, "empty after truncation"
+        if not fixed.isGeosValid():
+            return None, "invalid after truncation"
+        if against is not None:
+            partners = against if isinstance(against, (list, tuple)) else [against]
+            fixed_sg = shape(json.loads(fixed.asJson()))
+            residual = max(
+                (residual_overlap_pct(fixed_sg, other) for other in partners), default=0.0
+            )
+            if residual >= OVERLAP_RESIDUAL_TOLERANCE_PCT:
+                return None, "still overlaps by {:.3f} %".format(residual)
+        return fixed, ""
+
+    def _maybe_dissolve_part_overlaps(
+        self, geom, feature, ids, validation_rows, repair_log, part_overlap_records, min_pct
+    ):
+        """Category A (GH-12 FR-3): dissolve overlapping parts of a MultiPolygon.
+
+        Repairs invalid parts one by one, finds overlapping part pairs and
+        always dissolves them (no prompt). Pairs at/above ``min_pct`` (% of the
+        smaller part) get an ``overlap_parts`` row; every dissolve gets
+        ``overlap_parts_dissolved``. If the guard rejects the dissolve, returns
+        the per-part-repaired geometry so step 5 runs makeValid() as before,
+        with an ``overlap_unresolved`` row. Returns the input unchanged when no
+        parts overlap.
+        """
+        from shapely.geometry import MultiPolygon
+        from .overlaps import dissolve_part_overlaps, find_part_overlaps
+
+        if geom is None or geom.isEmpty() or not geom.isMultipart():
+            return geom
+
+        node_id, plot_id = ids
+        fid = feature.id()
+
+        try:
+            repaired, origin = self._repair_parts_individually(geom, feature)
+            sg = shape(json.loads(repaired.asJson()))
+            if not isinstance(sg, MultiPolygon):
+                return geom
+            findings = find_part_overlaps(sg, area_fn=self._shapely_area_m2, min_pct=min_pct)
+        except Exception as e:
+            self._log(self.tr("Part overlap check failed for feature {0}: {1}").format(fid, e))
+            return geom
+
+        if not findings:
+            return geom
+
+        def row(issue_type, message):
+            validation_rows.append({
+                "feature_id": fid,
+                "NodeID": node_id,
+                "PlotID": plot_id,
+                "status": "WARNING",
+                "issue_type": issue_type,
+                "message": message,
+            })
+
+        stats = self._part_overlap_stats
+        stats["found"] += len(findings)
+        stats["below_threshold"] += sum(1 for pf in findings if pf.below_threshold)
+
+        # One overlap_parts row per pair of *original* parts (a repaired part can
+        # contribute several pieces): summed area, largest %, at/above threshold
+        # if any piece pair is.
+        by_original = {}
+        for pf in findings:
+            key = tuple(sorted((origin[pf.i], origin[pf.j])))
+            area, pct, flagged = by_original.get(key, (0.0, 0.0, False))
+            by_original[key] = (
+                area + pf.area, max(pct, pf.pct_of_smaller), flagged or not pf.below_threshold
+            )
+        for (pa, pb), (area, pct, flagged) in sorted(by_original.items()):
+            if flagged:
+                row("overlap_parts", (
+                    "Original geometry had overlapping parts {0} and {1}: "
+                    "{2:.2f} m² ({3:.2f} % of the smaller part)"
+                ).format(pa, pb, area, pct))
+
+        # Overlaps-file records; labels and final IDs are filled in when the
+        # file is written (the auto NodeID/PlotID are only known at write time).
+        records = []
+        for pf in findings:
+            records.append({
+                "fid": fid,
+                "category": "A",
+                "type": "containment" if pf.pct_of_smaller >= 100.0 else "partial",
+                "NodeID_a": node_id,
+                "NodeID_b": node_id,
+                "PlotID_a": plot_id,
+                "PlotID_b": plot_id,
+                "part_a": min(origin[pf.i], origin[pf.j]),
+                "part_b": max(origin[pf.i], origin[pf.j]),
+                "area_m2": pf.area,
+                "pct_of_smaller": pf.pct_of_smaller,
+                "below_threshold": pf.below_threshold,
+                "action": "dissolved",
+                "geometry": pf.overlap_geom,
+            })
+
+        try:
+            dissolved = dissolve_part_overlaps(sg)
+            fixed, reason = self._guard_overlap_fix(dissolved)
+        except Exception as e:  # e.g. GEOS TopologyException in unary_union
+            fixed, reason = None, str(e)
+
+        if fixed is None:
+            stats["unresolved"] += 1
+            for rec in records:
+                rec["action"] = "unresolved"
+            part_overlap_records.extend(records)
+            row("overlap_unresolved",
+                "Overlap fix could not be applied (dissolve: {0})".format(reason))
+            self._log(self.tr(
+                "Feature {0}: overlapping parts could not be dissolved ({1}); "
+                "falling back to makeValid()."
+            ).format(fid, reason))
+            return repaired
+
+        stats["dissolved"] += 1
+        part_overlap_records.extend(records)
+        repair_log.setdefault(fid, []).append("Dissolved overlapping polygon parts")
+        row("overlap_parts_dissolved", "Dissolved overlapping polygon parts")
+        return fixed
+
+    def _evaluate_geometry_issues(self, geom):
+        """Recheck a geometry changed by an overlap fix (GH-12 FR-9).
+
+        Keep in sync with the inline checks in the per-feature loop of
+        _run_transformation_from_dialog (TRACT checks, minimum area, per-part
+        area, holes): the message strings must match so the report groups
+        them together (GH-12 DEC-10). Returns ``[(issue_type, message, detail)]``
+        where ``detail`` feeds the report lists.
+        """
+        issues = []
+        for err in self._get_tract_geometry_errors(geom):
+            issues.append(("tract_geometry_validation", err, err))
+
+        try:
+            area_ha = self._area_m2(geom) / 10000.0
+        except Exception as e:
+            self._log(self.tr("Area recheck failed: {}").format(e))
+            area_ha = None
+        if area_ha is not None and area_ha < MIN_PLOT_AREA_HA:
+            issues.append((
+                "small_area",
+                f"Area below minimum ({area_ha:.4f} ha < {MIN_PLOT_AREA_HA} ha)",
+                area_ha,
+            ))
+
+        if geom.isMultipart():
+            multipoly = geom.asMultiPolygon()
+            if len(multipoly) > 1:
+                for part_idx, part in enumerate(multipoly, start=1):
+                    try:
+                        part_area_ha = self._area_m2(QgsGeometry.fromPolygonXY(part)) / 10000.0
+                    except QgsCsException:
+                        continue
+                    if part_area_ha < MIN_PLOT_AREA_HA:
+                        issues.append((
+                            "small_area_part",
+                            f"Polygon part {part_idx} area below minimum "
+                            f"({part_area_ha:.4f} ha < {MIN_PLOT_AREA_HA} ha)",
+                            (part_idx, part_area_ha),
+                        ))
+
+        if self._geometry_has_holes(geom):
+            issues.append(("polygon_holes", "Polygon contains interior holes", None))
+        return issues
+
+    def _process_feature_overlaps(
+        self, output_path, written_fids, min_pct, validation_rows, repair_log, report_lists, label_fn
+    ):
+        """Categories B and C (GH-12 FR-4 to FR-10), on the written GeoJSON.
+
+        Detects overlaps between plots, writes WARNING rows, opens the review
+        dialog when something is fixable, applies the chosen fixes through the
+        post-fix guard, rechecks changed plots and rewrites the GeoJSON only if
+        something changed. ``report_lists`` holds the loop's NEEDS MANUAL FIX
+        lists (keys ``small_area``, ``small_area_part``, ``polygon_holes``,
+        ``tract``); they are updated in place.
+
+        Returns a dict for the report and the overlaps file, or ``None`` if the
+        stage could not run.
+        """
+        from collections import Counter
+
+        from .overlap_review_dialog import OverlapReviewDialog, is_fixable
+        from .overlaps import apply_feature_fixes, find_feature_overlaps
+
+        try:
+            with open(output_path, encoding="utf-8") as fh:
+                fc = json.load(fh)
+        except Exception as e:
+            self._log(self.tr("Overlap check skipped: could not read output ({})").format(e))
+            return None
+
+        out_features = fc.get("features", []) or []
+        if len(out_features) != len(written_fids):
+            self._log(self.tr(
+                "Overlap check skipped: output has {0} features, expected {1}."
+            ).format(len(out_features), len(written_fids)))
+            return None
+
+        def props(k):
+            return out_features[k].get("properties") or {}
+
+        def label(k):
+            return label_fn(written_fids[k])
+
+        def row(k, issue_type, message, status="WARNING"):
+            validation_rows.append({
+                "feature_id": written_fids[k],
+                "NodeID": props(k).get("NodeID"),
+                "PlotID": props(k).get("PlotID"),
+                "status": status,
+                "issue_type": issue_type,
+                "message": message,
+            })
+
+        # 1. Items from plots whose geometry is valid in Shapely.
+        items = []
+        not_checked = 0
+        for k, feat in enumerate(out_features):
+            try:
+                sg = shape(feat["geometry"]) if feat.get("geometry") else None
+            except Exception:
+                sg = None
+            if sg is None or sg.is_empty or not sg.is_valid:
+                not_checked += 1
+                continue
+            items.append({
+                "index": k,
+                "node_id": props(k).get("NodeID"),
+                "plot_id": props(k).get("PlotID"),
+                "geom": sg,
+                "has_z": sg.has_z,
+            })
+        by_index = {it["index"]: it for it in items}
+
+        # 2-3. Plot areas once, then detection with a progress bar.
+        area_m2 = {it["index"]: self._shapely_area_m2(it["geom"]) for it in items}
+
+        progress_message = self.iface.messageBar().createMessage(
+            "TRACT Geolocation Formatter:  Checking polygon overlaps..."
+        )
+        progress = QProgressBar()
+        progress.setMaximum(1)
+        progress.setValue(0)
+        progress.setFormat("%v / %m")
+        progress.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        progress_message.layout().addWidget(progress)
+        progress_item = self.iface.messageBar().pushWidget(progress_message, Qgis.MessageLevel.Info)
+
+        def on_progress(done, total):
+            progress.setMaximum(max(total, 1))
+            progress.setValue(done)
+            QApplication.processEvents()
+
+        try:
+            findings = find_feature_overlaps(
+                items,
+                area_fn=self._shapely_area_m2,
+                min_pct=min_pct,
+                plot_areas=area_m2,
+                progress=on_progress,
+            )
+        finally:
+            self.iface.messageBar().popWidget(progress_item)
+
+        # 4. WARNING rows for findings at/above the threshold, one per plot.
+        for f in findings:
+            if f.below_threshold:
+                continue
+            a, b = f.index_a, f.index_b
+            if f.kind == "partial":
+                if f.category == "B":
+                    template = "Overlaps {0} (same NodeID): {1:.2f} m² ({2:.2f} % of the smaller plot)"
+                    row(a, "overlap_same_node", template.format(label(b), f.area, f.pct_of_smaller))
+                    row(b, "overlap_same_node", template.format(label(a), f.area, f.pct_of_smaller))
+                else:
+                    template = "Overlaps {0} (NodeID {1}): {2:.2f} m² ({3:.2f} %)"
+                    row(a, "overlap_cross_node", template.format(
+                        label(b), props(b).get("NodeID"), f.area, f.pct_of_smaller))
+                    row(b, "overlap_cross_node", template.format(
+                        label(a), props(a).get("NodeID"), f.area, f.pct_of_smaller))
+            elif f.kind == "identical":
+                row(a, "overlap_containment", "Identical to {0}".format(label(b)))
+                row(b, "overlap_containment", "Identical to {0}".format(label(a)))
+            else:
+                row(f.contained, "overlap_containment", "Contained in {0}".format(label(f.container)))
+                row(f.container, "overlap_containment", "Contains {0}".format(label(f.contained)))
+
+        result = {
+            "findings": findings,
+            "not_checked": not_checked,
+            "labels": {k: label(k) for k in range(len(out_features))},
+            "properties": [dict(props(k)) for k in range(len(out_features))],
+            "actions": {},
+            "clipped": 0,
+            "deleted": 0,
+            "unresolved": 0,
+            "skipped_z": 0,
+            "deleted_fids": [],
+            "changed_fids": [],
+            "changed": False,
+            "needs_fix_count": None,
+            "final_node_ids": None,
+        }
+
+        # 5. Review dialog, only when something is fixable.
+        if not any(is_fixable(f) for f in findings):
+            return result
+
+        node_counts = Counter(
+            "" if props(k).get("NodeID") is None else str(props(k).get("NodeID"))
+            for k in range(len(out_features))
+        )
+        involved = {i for f in findings for i in (f.index_a, f.index_b)}
+        plots = {
+            k: {"label": label(k), "node_id": props(k).get("NodeID"), "area": area_m2.get(k)}
+            for k in involved
+        }
+        dialog = OverlapReviewDialog(findings, plots, node_counts, self.iface.mainWindow())
+        if not dialog.exec():
+            self._log(self.tr("Overlap fixes skipped; the output is unchanged."))
+            return result
+        clip_same_node, containment_actions, cross_node_actions = dialog.results()
+
+        skip_clip = frozenset(k for k, it in by_index.items() if it["has_z"])
+        new_geoms, deleted, actions = apply_feature_fixes(
+            items,
+            findings,
+            clip_same_node,
+            containment_actions,
+            cross_node_actions,
+            skip_clip=skip_clip,
+            plot_areas=area_m2,
+        )
+
+        # Clip partners of each changed plot, from the pair actions.
+        partners = {}
+        for (a, b), action in sorted(actions.items()):
+            if action == "clipped_a":
+                partners.setdefault(a, []).append(b)
+            elif action == "clipped_b":
+                partners.setdefault(b, []).append(a)
+            elif action == "skipped_z":
+                # The plot that would have been clipped: the user's choice for
+                # a cross-NodeID pair, otherwise the pair's Z plot(s).
+                choice = cross_node_actions.get((a, b))
+                if choice == "remove_from_a":
+                    targets = [a]
+                elif choice == "remove_from_b":
+                    targets = [b]
+                else:
+                    targets = [k for k in (a, b) if k in skip_clip]
+                for k in targets:
+                    result["skipped_z"] += 1
+                    row(k, "overlap_unresolved",
+                        "Overlap fix could not be applied (clip skipped: plot has Z values)")
+
+        # 6. Guard each changed geometry.
+        changed = set()
+        for k in sorted(new_geoms):
+            others = [new_geoms.get(o, by_index[o]["geom"]) for o in partners.get(k, [])]
+            try:
+                fixed, reason = self._guard_overlap_fix(new_geoms[k], against=others)
+            except Exception as e:
+                fixed, reason = None, str(e)
+            partner_labels = ", ".join(label(o) for o in partners.get(k, []))
+            if fixed is None:
+                result["unresolved"] += 1
+                for pair, action in actions.items():
+                    if action in ("clipped_a", "clipped_b") and k in pair and (
+                        (action == "clipped_a") == (pair[0] == k)
+                    ):
+                        actions[pair] = "unresolved"
+                row(k, "overlap_unresolved",
+                    "Overlap fix could not be applied ({0})".format(reason))
+                self._log(self.tr(
+                    "{0}: overlap clip with {1} could not be applied ({2}); kept as-is."
+                ).format(label(k), partner_labels, reason))
+                continue
+            if out_features[k]["geometry"]["type"].startswith("Multi") and not fixed.isMultipart():
+                fixed.convertToMultiType()
+            out_features[k]["geometry"] = json.loads(fixed.asJson(COORD_DECIMALS))
+            changed.add(k)
+            result["clipped"] += 1
+            # Say how much area the clip took, so a large change stands out.
+            clip_message = "Clipped overlap with {0}".format(partner_labels)
+            before = area_m2.get(k)
+            try:
+                after = self._area_m2(fixed)
+            except Exception:
+                after = None
+            if before and after is not None:
+                clip_message += "; area reduced by {0:.2f} % ({1:.2f} m² → {2:.2f} m²)".format(
+                    (before - after) / before * 100.0, before, after
+                )
+            row(k, "overlap_clipped", clip_message)
+            repair_log.setdefault(written_fids[k], []).append(clip_message)
+
+        # 7. Deletions.
+        def deletion_target(f):
+            choice = containment_actions.get((f.index_a, f.index_b))
+            if choice == "delete_contained":
+                return f.contained
+            if choice == "delete_container":
+                return f.container
+            return None
+
+        for k in sorted(deleted):
+            reasons = []
+            for f in findings:
+                if f.below_threshold or f.kind == "partial" or deletion_target(f) != k:
+                    continue
+                other = f.index_b if k == f.index_a else f.index_a
+                if f.kind == "identical":
+                    reasons.append("identical to {0}".format(label(other)))
+                elif f.contained == k:
+                    reasons.append("contained in {0}".format(label(other)))
+                else:
+                    reasons.append("contains {0}".format(label(other)))
+            reason_label = "; ".join(reasons)
+            row(k, "overlap_deleted", "Deleted: {0}".format(reason_label))
+            self._log(self.tr("{0} deleted ({1}).").format(label(k), reason_label))
+        result["deleted"] = len(deleted)
+        result["deleted_fids"] = [written_fids[k] for k in sorted(deleted)]
+
+        # 8. Recheck changed plots; replace their stale rows (DEC-9).
+        recheck_types = {"tract_geometry_validation", "small_area", "small_area_part", "polygon_holes"}
+        keep_prefixes = (
+            "Automatic geometry repair failed; manual fix required",
+            "Geometry remains invalid after automatic repair; manual fix required",
+        )
+        changed_fids = {written_fids[k] for k in changed}
+        gone_fids = changed_fids | set(result["deleted_fids"])
+        validation_rows[:] = [
+            r for r in validation_rows
+            if not (r["feature_id"] in changed_fids and r["issue_type"] in recheck_types)
+        ]
+        report_lists["small_area"][:] = [e for e in report_lists["small_area"] if e[0] not in gone_fids]
+        report_lists["small_area_part"][:] = [
+            e for e in report_lists["small_area_part"] if e[0] not in gone_fids
+        ]
+        report_lists["polygon_holes"][:] = [
+            fid for fid in report_lists["polygon_holes"] if fid not in gone_fids
+        ]
+        report_lists["tract"][:] = [e for e in report_lists["tract"] if e[0] not in gone_fids]
+
+        for k in sorted(changed):
+            fid = written_fids[k]
+            geom = QgsGeometry.fromWkt(shape(out_features[k]["geometry"]).wkt)
+            issues = self._evaluate_geometry_issues(geom)
+            tract_errors = []
+            for issue_type, message, detail in issues:
+                row(k, issue_type, message, status="ERROR")
+                if issue_type == "small_area":
+                    report_lists["small_area"].append((fid, detail))
+                elif issue_type == "small_area_part":
+                    report_lists["small_area_part"].append((fid, detail[0], detail[1]))
+                elif issue_type == "polygon_holes":
+                    report_lists["polygon_holes"].append(fid)
+                else:
+                    tract_errors.append(detail)
+            if tract_errors:
+                report_lists["tract"].append((fid, tract_errors))
+            p = out_features[k].setdefault("properties", {})
+            old_issue = p.get("TRACTIssue") or ""
+            new_issues = [prefix for prefix in keep_prefixes if old_issue.startswith(prefix)]
+            new_issues += [message for _, message, _ in issues]
+            p["TRACTStatus"] = "NEEDS_FIX" if new_issues else "READY"
+            p["TRACTIssue"] = "; ".join(new_issues)
+
+        # 9. Rewrite only if something changed (byte identity otherwise).
+        if changed or deleted:
+            fc["features"] = [feat for k, feat in enumerate(out_features) if k not in deleted]
+            with open(output_path, "w", encoding="utf-8") as fh:
+                json.dump(fc, fh)
+            result["changed"] = True
+            result["needs_fix_count"] = sum(
+                1 for feat in fc["features"]
+                if (feat.get("properties") or {}).get("TRACTStatus") == "NEEDS_FIX"
+            )
+            result["final_node_ids"] = [
+                (feat.get("properties") or {}).get("NodeID") for feat in fc["features"]
+            ]
+        result["changed_fids"] = sorted(changed_fids)
+        result["actions"] = actions
+        return result
+
+    def _overlap_records(self, written_fids, part_overlap_records, overlap_result, label_fn):
+        """Records for the overlaps file and the report (GH-12 FR-11).
+
+        Category A records (from the loop) first, in processing order, then the
+        B/C findings in finding order. Final NodeID/PlotID come from the output
+        properties, since auto IDs are only assigned at write time. Each record
+        also carries ``fid_a``/``fid_b`` for the report.
+        """
+        position = {fid: k for k, fid in enumerate(written_fids)}
+        properties = overlap_result["properties"] if overlap_result else None
+
+        def ids(fid, fallback_node, fallback_plot):
+            k = position.get(fid)
+            if properties is not None and k is not None:
+                p = properties[k]
+                return p.get("NodeID"), p.get("PlotID")
+            return fallback_node, fallback_plot
+
+        records = []
+        for rec in part_overlap_records:
+            node_id, plot_id = ids(rec["fid"], rec["NodeID_a"], rec["PlotID_a"])
+            out = dict(rec)
+            out.update({
+                "fid_a": rec["fid"],
+                "fid_b": rec["fid"],
+                "feature_a": label_fn(rec["fid"]),
+                "feature_b": label_fn(rec["fid"]),
+                "NodeID_a": node_id,
+                "NodeID_b": node_id,
+                "PlotID_a": plot_id,
+                "PlotID_b": plot_id,
+            })
+            records.append(out)
+
+        if overlap_result:
+            action_names = {"skipped_z": "unresolved"}
+            for f in overlap_result["findings"]:
+                pa = properties[f.index_a]
+                pb = properties[f.index_b]
+                action = overlap_result["actions"].get((f.index_a, f.index_b), "none")
+                records.append({
+                    "fid_a": written_fids[f.index_a],
+                    "fid_b": written_fids[f.index_b],
+                    "category": f.category,
+                    "type": f.kind,
+                    "feature_a": label_fn(written_fids[f.index_a]),
+                    "feature_b": label_fn(written_fids[f.index_b]),
+                    "NodeID_a": pa.get("NodeID"),
+                    "NodeID_b": pb.get("NodeID"),
+                    "PlotID_a": pa.get("PlotID"),
+                    "PlotID_b": pb.get("PlotID"),
+                    "part_a": None,
+                    "part_b": None,
+                    "area_m2": f.area,
+                    "pct_of_smaller": f.pct_of_smaller,
+                    "below_threshold": f.below_threshold,
+                    "action": action_names.get(action, action),
+                    "geometry": f.overlap_geom,
+                })
+        return records
+
     def _run_transformation_from_dialog(self):
         """Read settings from dialog and run the actual transformation."""
 
@@ -1552,6 +2192,11 @@ class TractGeolocationFormatter:
         # first holed polygon) and running stats for the report.
         self._hole_fix_policy = None  # None (undecided) | "fill" | "cut" | "flag"
         self._hole_stats = {"with_holes": 0, "fixed": 0, "parts": 0, "flagged": 0}
+
+        # GH-12: category A (overlapping MultiPolygon parts) stats and the
+        # records for the overlaps file.
+        self._part_overlap_stats = {"found": 0, "dissolved": 0, "unresolved": 0, "below_threshold": 0}
+        part_overlap_records = []
 
         # Track all feature-level geometry fixes in a structured way
         repair_log = {}  # { feature_id : [ "message1", "message2" ] }
@@ -1718,6 +2363,10 @@ class TractGeolocationFormatter:
         split_enabled = self.dlg.splitCheckBox.isChecked()
         split_count = self.dlg.splitCountSpin.value()
 
+        # Overlap-check options (GH-12) — wired into the pipeline in later tasks.
+        overlap_enabled = self.dlg.overlapCheckBox.isChecked()
+        overlap_min_pct = self.dlg.overlapThresholdSpin.value()
+
         # Output path
         output_path = self.dlg.outputPathLineEdit.text().strip()
         if not output_path:
@@ -1778,6 +2427,7 @@ class TractGeolocationFormatter:
             AREA_CRS,
             transform_context
         )
+        self._area_transform = area_transform  # GH-12: used by _area_m2
 
         if layer.crs() != target_crs:
             coord_transform = QgsCoordinateTransform(layer.crs(), target_crs, transform_context)
@@ -1823,6 +2473,7 @@ class TractGeolocationFormatter:
 
         invalid_features = []
         written_count = 0
+        written_fids = []  # GH-12: source fid of each written feature, in output order
         total_count = 0
         needs_fix_count = 0
         skipped_count = 0
@@ -1965,6 +2616,29 @@ class TractGeolocationFormatter:
                         skipped_count += 1
                         continue
 
+                # 4a. GH-12 category A: dissolve overlapping MultiPolygon parts
+                # before step 5, whose whole-geometry makeValid() would lose the
+                # overlap area.
+                if overlap_enabled and geom.isMultipart():
+                    geom = self._maybe_dissolve_part_overlaps(
+                        geom,
+                        f,
+                        self._get_ids(
+                            f,
+                            layer,
+                            node_use_existing,
+                            node_field_name,
+                            node_same,
+                            node_same_value,
+                            plot_existing,
+                            plot_field_name,
+                        ),
+                        validation_rows,
+                        repair_log,
+                        part_overlap_records,
+                        overlap_min_pct,
+                    )
+
                 # 5. NOW check validity, because truncation may have created self-intersections
                 if not geom.isGeosValid():
                     if f.id() not in repair_log:
@@ -2072,6 +2746,8 @@ class TractGeolocationFormatter:
                 geom = self._maybe_fix_holes(geom, f)
 
                 # Final TRACT-style geometry checks after truncation / duplicate cleanup / makeValid
+                # (GH-12 DEC-10: keep in sync with _evaluate_geometry_issues, which
+                # rechecks plots changed by overlap fixes with the same messages.)
                 tract_errors = self._get_tract_geometry_errors(geom)
 
                 if tract_errors:
@@ -2302,11 +2978,104 @@ class TractGeolocationFormatter:
                     continue
 
                 written_count += 1
+                written_fids.append(f.id())
 
         finally:
             self.iface.messageBar().popWidget(progress_item)
 
         del writer  # flush
+
+        # Label helpers (moved here unchanged for GH-12 DEC-11: the overlap
+        # stage below needs them before the report is built).
+        # Labels number features by their 1-based position in the input (sorted
+        # by fid). The fid itself is not a list index: GeoPackage fids start at
+        # 1 and any layer can have gaps, so indexing `features` by fid pointed
+        # at the wrong feature (GH-12 DEC-16).
+        _fid_position = {feat.id(): pos for pos, feat in enumerate(features)}
+
+        def _plot_id_suffix(fid):
+            """Return " (PlotID = X)" when a PlotID field is in use and set, else ""."""
+            pos = _fid_position.get(fid)
+            if pos is not None and plot_existing and plot_field_name:
+                idx = layer.fields().indexFromName(plot_field_name)
+                if idx != -1:
+                    val = features[pos].attributes()[idx]
+                    if val not in (None, ""):
+                        return f" (PlotID = {val})"
+            return ""
+
+        def _feature_label(fid):
+            """Human-readable feature label, including PlotID if present."""
+            # +1 for user-friendly 1-based indexing
+            return f"Feature {_fid_position.get(fid, fid) + 1}{_plot_id_suffix(fid)}"
+
+        def _feature_list(fids, max_items=20):
+            """Render a group of features inline, e.g. "Features 7, 8".
+
+            Used where several features share one message, so the report shows
+            one line per message instead of one line per feature.
+            """
+            fids = list(fids)
+            rendered = ", ".join(
+                f"{_fid_position.get(fid, fid) + 1}{_plot_id_suffix(fid)}" for fid in fids[:max_items]
+            )
+            if len(fids) > max_items:
+                rendered += self.tr(", and {} more").format(len(fids) - max_items)
+            template = self.tr("Feature {}") if len(fids) == 1 else self.tr("Features {}")
+            return template.format(rendered)
+
+
+        # GH-12 categories B/C: cross-feature overlaps on the written GeoJSON.
+        # Runs before the output is loaded, so the layer, report, CSV, Master
+        # Data and split all see the post-processed file.
+        overlap_result = None
+        if overlap_enabled:
+            overlap_result = self._process_feature_overlaps(
+                output_path,
+                written_fids,
+                overlap_min_pct,
+                validation_rows,
+                repair_log,
+                {
+                    "small_area": small_area_features,
+                    "small_area_part": small_area_part_features,
+                    "polygon_holes": polygon_hole_features,
+                    "tract": tract_manual_fix_features,
+                },
+                _feature_label,
+            )
+            if overlap_result and overlap_result["changed"]:
+                needs_fix_count = overlap_result["needs_fix_count"]
+                if overlap_result["deleted_fids"] and generate_master_data:
+                    # FR-12: a NodeID whose last plot was deleted must not
+                    # reach the Master Data file.
+                    unique_node_ids = dict.fromkeys(
+                        nid for nid in overlap_result["final_node_ids"] if nid
+                    )
+
+        # GH-12 FR-11: overlaps file, written whenever there is any finding
+        # (below-threshold ones included). Split never touches it.
+        overlap_records = []
+        overlaps_path = None
+        if overlap_enabled:
+            overlap_records = self._overlap_records(
+                written_fids, part_overlap_records, overlap_result, _feature_label
+            )
+        if overlap_records:
+            from .overlaps import overlaps_feature_collection
+
+            overlaps_path = os.path.splitext(output_path)[0] + "_overlaps.geojson"
+            try:
+                with open(overlaps_path, "w", encoding="utf-8") as fh:
+                    json.dump(
+                        overlaps_feature_collection(overlap_records, COORD_DECIMALS), fh
+                    )
+            except Exception as e:
+                self._log(self.tr("Overlaps file could not be written: {}").format(e))
+                overlaps_path = None
+        deleted_count = (
+            len(overlap_result["deleted_fids"]) if overlap_result else 0
+        )
 
         # Load output layer into QGIS
         layer_name = os.path.basename(output_path)
@@ -2314,6 +3083,12 @@ class TractGeolocationFormatter:
 
         if output_layer.isValid():
             QgsProject.instance().addMapLayer(output_layer)
+            if overlaps_path:
+                overlaps_layer = QgsVectorLayer(
+                    overlaps_path, os.path.basename(overlaps_path), "ogr"
+                )
+                if overlaps_layer.isValid():
+                    QgsProject.instance().addMapLayer(overlaps_layer)
         else:
             self.iface.messageBar().pushMessage(
                 "TRACT Geolocation Formatter",
@@ -2349,37 +3124,6 @@ class TractGeolocationFormatter:
 
         #     export_blocked = True
 
-        def _plot_id_suffix(fid):
-            """Return " (PlotID = X)" when a PlotID field is in use and set, else ""."""
-            if fid < len(features) and plot_existing and plot_field_name:
-                idx = layer.fields().indexFromName(plot_field_name)
-                if idx != -1:
-                    val = features[fid].attributes()[idx]
-                    if val not in (None, ""):
-                        return f" (PlotID = {val})"
-            return ""
-
-        def _feature_label(fid):
-            """Human-readable feature label, including PlotID if present."""
-            # +1 for user-friendly 1-based indexing
-            return f"Feature {fid + 1}{_plot_id_suffix(fid)}"
-
-        def _feature_list(fids, max_items=20):
-            """Render a group of features inline, e.g. "Features 7, 8".
-
-            Used where several features share one message, so the report shows
-            one line per message instead of one line per feature.
-            """
-            fids = list(fids)
-            rendered = ", ".join(
-                f"{fid + 1}{_plot_id_suffix(fid)}" for fid in fids[:max_items]
-            )
-            if len(fids) > max_items:
-                rendered += self.tr(", and {} more").format(len(fids) - max_items)
-            template = self.tr("Feature {}") if len(fids) == 1 else self.tr("Features {}")
-            return template.format(rendered)
-
-
         # BUILD SUMMARY REPORT
         
         # # Count skipped features
@@ -2393,10 +3137,11 @@ class TractGeolocationFormatter:
         report.title(self.tr("TRACT GeoJSON export finished."))
 
         report.section(self.tr("SUMMARY"))
-        written_value = str(written_count)
+        # GH-12: plots deleted by an overlap fix are not in the output.
+        written_value = str(written_count - deleted_count)
         if needs_fix_count > 0:
             written_value = self.tr("{0}   ({1} need manual fix)").format(
-                written_count, needs_fix_count
+                written_count - deleted_count, needs_fix_count
             )
         report.rows([
             (self.tr("Input features"), str(total_count)),
@@ -2417,6 +3162,11 @@ class TractGeolocationFormatter:
                 self.tr("{} written with TRACTStatus = NEEDS_FIX; fix them before "
                         "upload to TRACT.")
                 .format(_plural(needs_fix_count, "feature"))
+            )
+        if overlap_records:
+            report.bullet(
+                self.tr("{} found; see the overlaps file.")
+                .format(_plural(len(overlap_records), "overlap"))
             )
 
         # SPEC-fix-holes: summarize hole handling for this run.
@@ -2442,6 +3192,82 @@ class TractGeolocationFormatter:
                     str(self._hole_stats["flagged"]),
                 ))
             report.rows(hole_rows)
+
+        # GH-12: overlap check summary (listed rows are at/above the threshold).
+        if overlap_records:
+            report.section(self.tr("OVERLAPS ({})").format(len(overlap_records)))
+
+            def _action_text(rec):
+                action = rec["action"]
+                if action == "clipped_a":
+                    return self.tr("{} clipped").format(rec["feature_a"])
+                if action == "clipped_b":
+                    return self.tr("{} clipped").format(rec["feature_b"])
+                if action == "deleted_a":
+                    return self.tr("{} deleted").format(rec["feature_a"])
+                if action == "deleted_b":
+                    return self.tr("{} deleted").format(rec["feature_b"])
+                return {
+                    "dissolved": self.tr("dissolved"),
+                    "kept": self.tr("kept both"),
+                    "unresolved": self.tr("fix not applied"),
+                }.get(action, "")
+
+            def _overlap_row(rec):
+                if rec["category"] == "A":
+                    value = self.tr("parts {0} and {1}: {2:.2f} m² ({3:.2f} %)").format(
+                        rec["part_a"], rec["part_b"], rec["area_m2"], rec["pct_of_smaller"]
+                    )
+                else:
+                    value = self.tr("with {0}: {1:.2f} m² ({2:.2f} %)").format(
+                        rec["feature_b"], rec["area_m2"], rec["pct_of_smaller"]
+                    )
+                action = _action_text(rec)
+                if action:
+                    value += " — " + action
+                return (rec["feature_a"], value)
+
+            listed = [r for r in overlap_records if not r["below_threshold"]]
+            groups = [
+                (self.tr("Overlapping polygon parts (dissolved)"),
+                 [r for r in listed if r["category"] == "A"]),
+                (self.tr("Same NodeID"),
+                 [r for r in listed if r["category"] == "B" and r["type"] == "partial"]),
+                (self.tr("Different NodeIDs"),
+                 [r for r in listed if r["category"] == "C" and r["type"] == "partial"]),
+                (self.tr("Contained / identical"),
+                 [r for r in listed if r["category"] != "A" and r["type"] != "partial"]),
+            ]
+            for title, recs in groups:
+                if not recs:
+                    continue
+                report.subsection(f"{title} ({len(recs)})")
+                report.rows([_overlap_row(r) for r in recs[:500]], level=2)
+                if len(recs) > 500:
+                    report.note(
+                        self.tr("... and {} more.").format(len(recs) - 500), level=2
+                    )
+
+            part_stats = self._part_overlap_stats
+            count_rows = [
+                (self.tr("Plots with overlapping parts dissolved"), part_stats["dissolved"]),
+                (self.tr("Plots clipped"), overlap_result["clipped"] if overlap_result else 0),
+                (self.tr("Plots deleted"), deleted_count),
+                (self.tr("Fixes not applied"),
+                 part_stats["unresolved"] + (overlap_result["unresolved"] if overlap_result else 0)),
+                (self.tr("Clips skipped (Z values)"),
+                 overlap_result["skipped_z"] if overlap_result else 0),
+                (self.tr("Plots not checked for overlaps (invalid geometry)"),
+                 overlap_result["not_checked"] if overlap_result else 0),
+            ]
+            report.rows([(label, str(n)) for label, n in count_rows if n])
+            below = len(overlap_records) - len(listed)
+            if below:
+                report.note(
+                    self.tr("{0} below the {1:g} % threshold not listed.").format(
+                        _plural(below, "overlap"), overlap_min_pct
+                    )
+                )
 
         if invalid_features:
             report.section(
@@ -2667,6 +3493,8 @@ class TractGeolocationFormatter:
             file_rows.append((self.tr("Validation report"), report_path))
         if master_data_written:
             file_rows.append((self.tr("Master Data"), master_data_written))
+        if overlaps_path and os.path.exists(overlaps_path):
+            file_rows.append((self.tr("Overlaps"), overlaps_path))
 
         if file_rows:
             report.section(self.tr("FILES"))
