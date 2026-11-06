@@ -519,6 +519,49 @@
     </widget>
    </item>
 
+   <!-- Overlap check group (GH-12) -->
+   <item>
+    <widget class="QGroupBox" name="overlapGroupBox">
+     <property name="title">
+      <string>Overlap check</string>
+     </property>
+     <layout class="QVBoxLayout" name="overlapLayout">
+      <item>
+       <widget class="QCheckBox" name="overlapCheckBox">
+        <property name="text">
+         <string>Check polygon overlaps</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QWidget" name="overlapContainer">
+        <layout class="QHBoxLayout" name="overlapContainerLayout">
+         <item>
+          <widget class="QLabel" name="overlapThresholdLabel">
+           <property name="text">
+            <string>Minimum overlap (% of smaller plot):</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QDoubleSpinBox" name="overlapThresholdSpin">
+           <property name="decimals"><number>1</number></property>
+           <property name="minimum"><double>0.0</double></property>
+           <property name="maximum"><double>100.0</double></property>
+           <property name="singleStep"><double>0.1</double></property>
+           <property name="value"><double>1.0</double></property>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+
    <!-- Description group -->
    <item>
     <widget class="QGroupBox" name="logGroupBox">

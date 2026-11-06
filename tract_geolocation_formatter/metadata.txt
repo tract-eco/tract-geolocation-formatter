@@ -3,7 +3,7 @@ name=TRACT Geolocation Formatter
 qgisMinimumVersion=3.38
 qgisMaximumVersion=4.99
 description=Validate, clean, and convert geolocation layers into the TRACT GeoJSON template for sustainability and traceability workflows.
-version=0.5.1
+version=0.6.0-dev
 author=Luis Carrasco
 email=luiscartor@gmail.com
 
@@ -17,6 +17,28 @@ homepage=https://github.com/tract-eco/tract-geolocation-formatter
 hasProcessingProvider=no
 
 changelog=
+    0.6.0
+    - Optional overlap check (off by default; tick "Check polygon overlaps"
+      and set a threshold, default 1 percent of the smaller plot). (GH-12)
+    - With the check on, parts of one plot that overlap are dissolved into one
+      shape, keeping the full plot area. The usual repair could lose the
+      overlapping area.
+    - Overlaps between plots are listed in a review dialog after export. You choose
+      what to change: clip plots of the same NodeID (the largest stays as it is),
+      delete contained or identical plots, or remove the overlap from one plot of a
+      pair with different NodeIDs. Nothing changes unless you press Apply. Plots
+      with Z values are never clipped. For each clipped plot, the report and CSV
+      show how much area it lost (percentage and m² before and after).
+    - Every fixed plot is checked again, so a clip that leaves a plot too small is
+      flagged NEEDS_FIX. Deleted plots are left out of the output, the split files
+      and Master Data, and stay in the CSV report.
+    - New <name>_overlaps.geojson with one feature per overlap area (plots, NodeIDs,
+      PlotIDs, area, percentage and action taken), loaded into QGIS. New OVERLAPS section
+      in the report and overlap_* rows in the CSV report.
+    - Fixed: for GeoPackage layers (and any layer whose feature IDs don't start at
+      0), report labels pointed at the wrong feature: "Feature N (PlotID = ...)"
+      showed the number and PlotID of the next feature. Labels now use the feature's
+      position in the input layer. Output files were not affected.
     0.5.1
     - Fixed a crash on load for QGIS 3.36 and earlier: "TypeError: QgsField():
       arguments did not match any overloaded call". The version-safe string field

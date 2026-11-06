@@ -28,7 +28,8 @@ class TractGeolocationFormatterDialog(QtWidgets.QDialog, FORM_CLASS):
             "The tool also performs data quality checks:\n"
             "- Minimum polygon area validation\n"
             "- Detection of polygons with interior holes\n"
-            "- Identification of empty or invalid geometries\n\n"
+            "- Identification of empty or invalid geometries\n"
+            "- Detection of overlapping polygons and polygon parts\n\n"
             "Configure NodeID and PlotID options and export a clean "
             "TRACT-compatible GeoJSON file together with a validation report."
         )
