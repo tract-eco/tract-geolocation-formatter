@@ -932,9 +932,10 @@ class TractGeolocationFormatter:
         self.dlg.splitCheckBox.setChecked(False)
         self.dlg.splitCountSpin.setValue(2)
 
-        # Overlap-check defaults (GH-12) — on, 1 % of the smaller plot.
-        self.dlg.overlapCheckBox.setChecked(True)
-        self.dlg.overlapThresholdSpin.setValue(1.0)
+        # Overlap-check defaults (GH-12, DEC-20) — off; threshold 0 % of the smaller
+        # plot, so every overlap is listed once the user ticks the check.
+        self.dlg.overlapCheckBox.setChecked(False)
+        self.dlg.overlapThresholdSpin.setValue(0.0)
 
         # Enable/disable state is refreshed when dialog opens
         self._update_nodeid_ui_state()

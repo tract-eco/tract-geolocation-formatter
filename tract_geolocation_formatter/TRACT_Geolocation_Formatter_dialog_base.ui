@@ -532,7 +532,7 @@
          <string>Check polygon overlaps</string>
         </property>
         <property name="checked">
-         <bool>true</bool>
+         <bool>false</bool>
         </property>
        </widget>
       </item>
@@ -552,7 +552,7 @@
            <property name="minimum"><double>0.0</double></property>
            <property name="maximum"><double>100.0</double></property>
            <property name="singleStep"><double>0.1</double></property>
-           <property name="value"><double>1.0</double></property>
+           <property name="value"><double>0.0</double></property>
           </widget>
          </item>
         </layout>

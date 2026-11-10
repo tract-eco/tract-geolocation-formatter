@@ -19,7 +19,8 @@ hasProcessingProvider=no
 changelog=
     0.6.0
     - Optional overlap check (off by default; tick "Check polygon overlaps"
-      and set a threshold, default 1 percent of the smaller plot). (GH-12)
+      and optionally set a threshold as a percentage of the smaller plot; the
+      default 0 lists every overlap). (GH-12)
     - With the check on, parts of one plot that overlap are dissolved into one
       shape, keeping the full plot area. The usual repair could lose the
       overlapping area.
