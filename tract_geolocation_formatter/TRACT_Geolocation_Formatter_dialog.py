@@ -29,7 +29,9 @@ class TractGeolocationFormatterDialog(QtWidgets.QDialog, FORM_CLASS):
             "- Minimum polygon area validation\n"
             "- Detection of polygons with interior holes\n"
             "- Identification of empty or invalid geometries\n"
-            "- Detection of overlapping polygons and polygon parts\n\n"
+            "- Detection of overlapping polygons and polygon parts\n"
+            "- Optional check of plot overlap with water and built-up areas "
+            "(ESA WorldCover or your own rasters)\n\n"
             "Configure NodeID and PlotID options and export a clean "
             "TRACT-compatible GeoJSON file together with a validation report."
         )
