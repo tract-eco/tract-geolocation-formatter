@@ -3786,56 +3786,20 @@ class TractGeolocationFormatter:
         if overlap_records:
             report.section(self.tr("OVERLAPS ({})").format(len(overlap_records)))
 
-            def _action_text(rec):
-                action = rec["action"]
-                if action == "clipped_a":
-                    return self.tr("{} clipped").format(rec["feature_a"])
-                if action == "clipped_b":
-                    return self.tr("{} clipped").format(rec["feature_b"])
-                if action == "deleted_a":
-                    return self.tr("{} deleted").format(rec["feature_a"])
-                if action == "deleted_b":
-                    return self.tr("{} deleted").format(rec["feature_b"])
-                return {
-                    "dissolved": self.tr("dissolved"),
-                    "kept": self.tr("kept both"),
-                    "unresolved": self.tr("fix not applied"),
-                }.get(action, "")
-
-            def _overlap_row(rec):
-                if rec["category"] == "A":
-                    value = self.tr("parts {0} and {1}: {2:.2f} m² ({3:.2f} %)").format(
-                        rec["part_a"], rec["part_b"], rec["area_m2"], rec["pct_of_smaller"]
-                    )
-                else:
-                    value = self.tr("with {0}: {1:.2f} m² ({2:.2f} %)").format(
-                        rec["feature_b"], rec["area_m2"], rec["pct_of_smaller"]
-                    )
-                action = _action_text(rec)
-                if action:
-                    value += " — " + action
-                return (rec["feature_a"], value)
-
+            # Counts by type only: the per-overlap detail (plots, area, %, action)
+            # is in the overlaps file and the CSV report, not the pop-up.
             listed = [r for r in overlap_records if not r["below_threshold"]]
-            groups = [
+            type_rows = [
                 (self.tr("Overlapping polygon parts (dissolved)"),
-                 [r for r in listed if r["category"] == "A"]),
+                 sum(1 for r in listed if r["category"] == "A")),
                 (self.tr("Same NodeID"),
-                 [r for r in listed if r["category"] == "B" and r["type"] == "partial"]),
+                 sum(1 for r in listed if r["category"] == "B" and r["type"] == "partial")),
                 (self.tr("Different NodeIDs"),
-                 [r for r in listed if r["category"] == "C" and r["type"] == "partial"]),
+                 sum(1 for r in listed if r["category"] == "C" and r["type"] == "partial")),
                 (self.tr("Contained / identical"),
-                 [r for r in listed if r["category"] != "A" and r["type"] != "partial"]),
+                 sum(1 for r in listed if r["category"] != "A" and r["type"] != "partial")),
             ]
-            for title, recs in groups:
-                if not recs:
-                    continue
-                report.subsection(f"{title} ({len(recs)})")
-                report.rows([_overlap_row(r) for r in recs[:500]], level=2)
-                if len(recs) > 500:
-                    report.note(
-                        self.tr("... and {} more.").format(len(recs) - 500), level=2
-                    )
+            report.rows([(label, str(n)) for label, n in type_rows if n])
 
             part_stats = self._part_overlap_stats
             count_rows = [
@@ -3853,10 +3817,11 @@ class TractGeolocationFormatter:
             below = len(overlap_records) - len(listed)
             if below:
                 report.note(
-                    self.tr("{0} below the {1:g} % threshold not listed.").format(
+                    self.tr("{0} below the {1:g} % threshold not counted above; they are only in the overlaps file.").format(
                         _plural(below, "overlap"), overlap_min_pct
                     )
                 )
+            report.note(self.tr("Each overlap is listed in the overlaps file and the CSV report."))
 
         if invalid_features:
             report.section(

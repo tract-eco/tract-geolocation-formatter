@@ -120,7 +120,19 @@ class OverlapReviewDialog(QDialog):
         layout.addWidget(self.clipCheckBox)
 
         # 2. Containment / identical.
+        containment_header = QHBoxLayout()
         self.containmentLabel = QLabel(_tr("Contained plots"))
+        self.containmentBulkCombo = QComboBox()
+        self.containmentBulkCombo.addItem(_tr("Set all to: —"), _BULK_NONE)
+        self.containmentBulkCombo.addItem(_tr("Delete contained"), DELETE_CONTAINED)
+        self.containmentBulkCombo.addItem(_tr("Delete container"), DELETE_CONTAINER)
+        self.containmentBulkCombo.addItem(_tr("Keep both"), KEEP)
+        self.containmentBulkCombo.currentIndexChanged.connect(
+            self._apply_bulk_containment_action
+        )
+        containment_header.addWidget(self.containmentLabel)
+        containment_header.addStretch(1)
+        containment_header.addWidget(self.containmentBulkCombo)
         self.containmentTable = self._make_table(
             [
                 _tr("Contained"),
@@ -147,8 +159,9 @@ class OverlapReviewDialog(QDialog):
             self._containment_combos.append(combo)
         has_containment = bool(self._containment)
         self.containmentLabel.setVisible(has_containment)
+        self.containmentBulkCombo.setVisible(has_containment)
         self.containmentTable.setVisible(has_containment)
-        layout.addWidget(self.containmentLabel)
+        layout.addLayout(containment_header)
         layout.addWidget(self.containmentTable)
 
         # 3. Cross-NodeID partial overlaps.
@@ -292,6 +305,22 @@ class OverlapReviewDialog(QDialog):
             else:
                 item.setIcon(QIcon())
                 item.setToolTip("")
+
+    def _apply_bulk_containment_action(self, *_args):
+        """Set every containment row from the bulk control; rows stay editable."""
+        choice = self.containmentBulkCombo.currentData()
+        if not choice:
+            return
+        for combo in self._containment_combos:
+            # Signals off: the last-plot marks are refreshed once, below.
+            combo.blockSignals(True)
+            combo.setCurrentIndex(combo.findData(choice))
+            combo.blockSignals(False)
+        self._refresh_last_plot_marks()
+        # Back to "—" so a later bulk choice of the same value applies again.
+        self.containmentBulkCombo.blockSignals(True)
+        self.containmentBulkCombo.setCurrentIndex(0)
+        self.containmentBulkCombo.blockSignals(False)
 
     def _apply_bulk_cross_action(self, *_args):
         """Set every cross-NodeID row from the bulk control; rows stay editable."""
