@@ -47,6 +47,7 @@ The plugin works directly on existing QGIS layers and does **not** require advan
 - Detect and flag common geometry issues before export
 - Export ready-to-upload GeoJSON files for the TRACT platform
 - Optionally generate a populated **Master Data XLSX** file (Farms or Farmer Groups) alongside the GeoJSON, with one row per unique NodeID and a user-selected country — ready for TRACT ingestion without manual template filling
+- Optionally **check for overlapping plots** and fix them — clip the overlap, delete a duplicate or keep both (see [Overlap Check](#overlap-check-optional))
 - Optionally **check plots against water and built-up areas** (ESA WorldCover 2021 or your own classified rasters) and get the overlap per plot in the GeoJSON, a CSV and on the map (see [Land Cover Check](#land-cover-check-optional))
 - Optionally **split the clean GeoJSON output into 2–10 smaller files** so large datasets upload to TRACT under its size limit — features sharing a NodeID always stay together in one file, and feature counts are balanced across files
 - Scrollable dialog so OK / Cancel buttons stay reachable on small / laptop screens
@@ -86,40 +87,42 @@ Details worth knowing:
 - The summary report shows how many holed features were fixed and how many were left flagged.
 
 
+## Overlap Check (optional)
+
+Overlapping plots are a common reason a dataset is rejected. Tick **Check polygon overlaps** to find them. The threshold (a percentage of the smaller plot, default 0) sets which overlaps are offered for fixing; smaller ones are still recorded.
+
+- **Parts of one plot** that overlap each other are dissolved into one shape, keeping the full plot area.
+- **Overlapping plots** (with the same NodeID, with different NodeIDs, or one inside another) are shown for review after the export. You can clip the overlap, delete a contained or duplicate plot, or keep both. Nothing is changed unless you apply the fixes.
+- Every changed plot is checked again, so a clip that leaves a plot too small is flagged `NEEDS_FIX`. Deleted plots are left out of every output. Plots with Z values are never clipped.
+
+**Results:** `<name>_overlaps.geojson` with one feature per overlap area (loaded into QGIS), the overlaps in the validation report CSV, and a count by type in the summary report.
+
+
 ## Land Cover Check (optional)
 
-A plot drawn over a lake, a river or a village is usually a misplaced or badly digitised boundary. In the **Land cover check** box, tick **Water**, **Built-up** or both to measure, for every plot, how much of it lies on **permanent water** or **built-up land**. It is a warning only: `TRACTStatus` and the validation report are not affected, and no plot is changed or removed. With nothing ticked, the check doesn't run.
+A plot drawn over a lake, a river or a village is usually a misplaced boundary. In the **Land cover check** box, tick **Water**, **Built-up** or both to measure how much of each plot lies on permanent water or built-up land. It is a warning only: no plot is changed and `TRACTStatus` is not affected.
 
-**Each class has its own source** — mix them freely (e.g. your own water layer with WorldCover built-up, or only water):
+Each class has its own source, and they can be mixed:
 
-| Source | Reference data | Network |
-|--------|----------------|---------|
-| **ESA WorldCover 2021** (default) | [ESA WorldCover 10 m 2021 v200](https://esa-worldcover.org): class 80 = permanent water bodies, 50 = built-up. Only the tiles (3×3°) that contain plots are read, block by block — nothing is downloaded up front. More than 12 tiles asks for confirmation first. | Reads from ESA's public AWS bucket |
-| **User layer** | Your own classified raster, already loaded in QGIS: pick the raster layer, the band and the class value (pre-filled from the layer's paletted style when it has one). The same layer can serve both classes with different values. Web map / XYZ layers are rejected (their pixels are colours, not classes). | None |
+- **ESA WorldCover 2021** (10 m, the default): only the tiles that contain plots are read from ESA's public bucket. Needs internet.
+- **User layer**: your own classified raster loaded in QGIS (layer, band and class value). Works offline.
 
 **Results:**
 
-- **GeoJSON fields** on every plot: `WaterOverlap_m2`, `WaterOverlap_pct`, `BuiltUpOverlap_m2`, `BuiltUpOverlap_pct`. `0` = no overlap; empty (null) = the plot is outside the reference data. In QGIS, open the output layer's attribute table and filter, e.g. `"WaterOverlap_pct" > 0`, to find, edit or delete flagged plots. The split files carry the same fields.
-- **`<name>_landcover_overlaps.csv`** — one row per plot and class with overlap (`feature_id, NodeID, PlotID, class, overlap_area_m2, overlap_pct, plot_area_m2, source`), plus `no_coverage` rows for plots the reference data does not reach.
-- **Two summary lines** in the report, e.g. `Water overlap: 3 of 120 plots`, `Built-up overlap: not checked` for an unticked class, or `not run (<reason>)` if a class could not run (for example WorldCover without internet — a class using a user layer still runs). The export itself always completes.
-- **Map layer (when a class uses WorldCover)** — *WorldCover 2021: water & built-up* (water blue, built-up red, everything else transparent) in a group *TRACT land cover check* below your output. Re-running replaces it. The layer reads from a temporary file, so in a saved project it may stop working after a restart: run the check again to bring it back.
+- Four fields per plot in the GeoJSON: `WaterOverlap_m2`, `WaterOverlap_pct`, `BuiltUpOverlap_m2`, `BuiltUpOverlap_pct` (`0` = no overlap, empty = the plot is outside the reference data). Filter the attribute table, e.g. `"WaterOverlap_pct" > 0`, to find flagged plots.
+- `<name>_landcover_overlaps.csv` listing every overlap, and two lines in the summary report.
+- When a class uses WorldCover, a styled WorldCover layer is added below the output.
 
-**How it is measured:** pixels whose centre falls in the plot are counted (a very small plot is assessed from the one pixel it lies in); the overlap % is class pixels ÷ all pixels, and the area is that % of the plot's area. There is no threshold — a single 10 m pixel is reported, so filter by `overlap_pct` to ignore edge touches.
+If a class can't run (for example WorldCover without internet), the export still completes.
 
-**Limitations:**
+**Limitations:** WorldCover is a 2021 snapshot, so anything built since is not flagged. 10 m pixels are approximate for plots of a few hundred m². Only permanent water counts.
 
-- WorldCover is a **2021 snapshot**: anything built since is not flagged.
-- 10 m pixels are coarse for small plots; percentages for plots of a few hundred m² are approximate.
-- Only **permanent** water counts: seasonal water, paddies and wetlands are not flagged.
-- With a user layer, plots extending beyond your raster are assessed on the covered part only.
-- Antimeridian-crossing plots are not supported.
-
-**Data, licence and privacy:** ESA WorldCover is licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Attribution (set on the map layer): *© ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium.* No plot data leaves your computer; when a class uses WorldCover, the tile requests only reveal which 3×3° areas contain plots. QGIS proxy settings are used. User layers work fully offline, and if no ticked class uses WorldCover no request is made at all.
+**Licence and privacy:** ESA WorldCover is licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Attribution (set on the map layer): *© ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium.* No plot data leaves your computer; the WorldCover tile requests only reveal which 3×3° areas contain plots.
 
 
 ## Output Files
 
-The plugin produces up to three outputs (the third is opt-in); a fourth option splits the first output into several files. Optional checks add their own files: the overlaps GeoJSON (polygon overlap check) and the land cover CSV (see [Land Cover Check](#land-cover-check-optional)).
+The plugin produces up to three outputs (the third is opt-in); a fourth option splits the first output into several files. Optional checks add their own files: the overlaps GeoJSON (see [Overlap Check](#overlap-check-optional)) and the land cover CSV (see [Land Cover Check](#land-cover-check-optional)).
 
 1. GeoJSON file structured according to the TRACT geolocation template
 
