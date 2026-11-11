@@ -29,7 +29,7 @@ from html import escape as _escape_html
 from shapely.geometry import shape, LineString
 
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
-from qgis.PyQt.QtGui import QIcon
+from qgis.PyQt.QtGui import QIcon, QIntValidator
 from qgis.PyQt.QtWidgets import (
     QAction,
     QMessageBox,
@@ -57,6 +57,7 @@ from qgis.core import (
     QgsCoordinateTransform,
     QgsCsException,
     Qgis,
+    QgsRasterLayer,
     QgsVectorLayer
 )
 
@@ -575,6 +576,94 @@ def _write_master_data_xlsx(template_path, output_path, master_data_type, countr
     write_cells(template_path, output_path, mapping["sheet_name"], values)
 
 
+# --------------------------------------------------------------------------- #
+# Land cover check: dialog helpers (SPEC-landcover-overlap)
+# --------------------------------------------------------------------------- #
+
+LANDCOVER_SETTINGS_PREFIX = "tract_geolocation_formatter/landcover/"
+
+
+def _raster_layer_filter():
+    """Raster-only filter for QgsMapLayerComboBox on QGIS 3.x and 4."""
+    try:
+        return Qgis.LayerFilter.RasterLayer
+    except AttributeError:
+        from qgis.core import QgsMapLayerProxyModel
+
+        return QgsMapLayerProxyModel.RasterLayer
+
+
+def _setting_int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_exact_color_ramp(shader_function):
+    """True for an 'Exact' colour ramp, where each item is one class value."""
+    exact = []
+    try:
+        exact.append(Qgis.ShaderInterpolationMethod.Exact)
+    except AttributeError:
+        pass
+    try:
+        from qgis.core import QgsColorRampShader
+
+        exact.append(QgsColorRampShader.Exact)
+    except (ImportError, AttributeError):
+        pass
+    return shader_function.colorRampType() in exact
+
+
+def _renderer_class_values(layer, band):
+    """Class values shown by the layer's renderer for ``band``, without reading pixels.
+
+    Paletted/unique-values renderers give their class values; a single-band
+    pseudocolor renderer with an 'Exact' ramp gives its item values. Anything else
+    (continuous ramps, multiband colour, no renderer) gives ``[]``, and the user types a
+    value instead. Only whole numbers are returned, sorted and de-duplicated.
+    """
+    if layer is None or band is None or not isinstance(layer, QgsRasterLayer):
+        return []
+    renderer = layer.renderer()
+    if renderer is None:
+        return []
+    from qgis.core import (
+        QgsColorRampShader,
+        QgsPalettedRasterRenderer,
+        QgsSingleBandPseudoColorRenderer,
+    )
+
+    def renderer_band(r):
+        for name in ("inputBand", "band"):
+            fn = getattr(r, name, None)
+            if fn is not None:
+                try:
+                    return fn()
+                except Exception:
+                    continue
+        return None
+
+    raw = []
+    if isinstance(renderer, QgsPalettedRasterRenderer) and renderer_band(renderer) == band:
+        raw = [c.value for c in renderer.classes()]
+    elif isinstance(renderer, QgsSingleBandPseudoColorRenderer) and renderer_band(renderer) == band:
+        shader = renderer.shader()
+        function = shader.rasterShaderFunction() if shader is not None else None
+        if isinstance(function, QgsColorRampShader) and _is_exact_color_ramp(function):
+            raw = [item.value for item in function.colorRampItemList()]
+    values = set()
+    for v in raw:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if f.is_integer():
+            values.add(int(f))
+    return sorted(values)
+
+
 class TractGeolocationFormatter:
     """QGIS Plugin Implementation."""
 
@@ -737,6 +826,8 @@ class TractGeolocationFormatter:
             self.dlg.splitCheckBox.toggled.connect(self._update_split_ui_state)
             # Connect Overlap-check checkbox (GH-12)
             self.dlg.overlapCheckBox.toggled.connect(self._update_overlap_ui_state)
+            # Land cover check controls (SPEC-landcover-overlap)
+            self._connect_landcover_signals()
 
         # Populate dialog every time (layers, fields, defaults)
         self._populate_dialog()
@@ -744,6 +835,12 @@ class TractGeolocationFormatter:
         result = self.dlg.exec()
         if not result:
             return
+
+        # FR-9: remember the land cover options for the next time the dialog opens.
+        try:
+            self._save_landcover_settings()
+        except Exception as e:
+            self._log("Land cover settings could not be saved: {}".format(e))
 
         self._run_transformation_from_dialog()
 
@@ -828,9 +925,10 @@ class TractGeolocationFormatter:
         self.dlg.splitCheckBox.setChecked(False)
         self.dlg.splitCountSpin.setValue(2)
 
-        # Overlap-check defaults (GH-12) — on, 1 % of the smaller plot.
-        self.dlg.overlapCheckBox.setChecked(True)
-        self.dlg.overlapThresholdSpin.setValue(1.0)
+        # Overlap-check defaults (GH-12, DEC-20) — off; threshold 0 % of the smaller
+        # plot, so every overlap is listed once the user ticks the check.
+        self.dlg.overlapCheckBox.setChecked(False)
+        self.dlg.overlapThresholdSpin.setValue(0.0)
 
         # Enable/disable state is refreshed when dialog opens
         self._update_nodeid_ui_state()
@@ -838,6 +936,9 @@ class TractGeolocationFormatter:
         self._update_master_data_ui_state()
         self._update_split_ui_state()
         self._update_overlap_ui_state()
+
+        # Land cover check (SPEC-landcover-overlap): restore the last-used options (FR-9).
+        self._load_landcover_settings()
 
     def _update_nodeid_ui_state(self):
         """Enable only the relevant NodeID input widget."""
@@ -863,6 +964,463 @@ class TractGeolocationFormatter:
     def _update_overlap_ui_state(self):
         """Enable the overlap threshold only when the check is ticked (GH-12)."""
         self.dlg.overlapContainer.setEnabled(self.dlg.overlapCheckBox.isChecked())
+
+    # ------------------------------------------------------------------ #
+    # Land cover check: dialog controls and settings (SPEC-landcover-overlap)
+    # ------------------------------------------------------------------ #
+
+    def _landcover_widgets(self, cls):
+        """(layer combo, band combo, value combo) of a class key."""
+        from .landcover import WATER
+
+        if cls == WATER:
+            return (
+                self.dlg.landcoverWaterLayerCombo,
+                self.dlg.landcoverWaterBandCombo,
+                self.dlg.landcoverWaterValueCombo,
+            )
+        return (
+            self.dlg.landcoverBuiltUpLayerCombo,
+            self.dlg.landcoverBuiltUpBandCombo,
+            self.dlg.landcoverBuiltUpValueCombo,
+        )
+
+    def _landcover_row(self, cls):
+        """(checkbox, source combo) of a class row (DEC-21)."""
+        from .landcover import WATER
+
+        if cls == WATER:
+            return self.dlg.landcoverWaterCheckBox, self.dlg.landcoverWaterSourceCombo
+        return self.dlg.landcoverBuiltUpCheckBox, self.dlg.landcoverBuiltUpSourceCombo
+
+    def _connect_landcover_signals(self):
+        """One-time setup of the land cover controls (sources, filters, validators, signals)."""
+        from .landcover import CLASSES, SOURCE_PROJECT, SOURCE_WORLDCOVER
+
+        for cls in CLASSES:
+            checkbox, source_combo = self._landcover_row(cls)
+            source_combo.clear()
+            source_combo.addItem(self.tr("ESA WorldCover 2021"), SOURCE_WORLDCOVER)
+            source_combo.addItem(self.tr("User layer"), SOURCE_PROJECT)
+            checkbox.toggled.connect(self._update_landcover_ui_state)
+            source_combo.currentIndexChanged.connect(self._update_landcover_ui_state)
+            layer_combo, band_combo, value_combo = self._landcover_widgets(cls)
+            layer_combo.setFilters(_raster_layer_filter())
+            layer_combo.setAllowEmptyLayer(True)
+            value_combo.setValidator(QIntValidator(value_combo))
+            layer_combo.layerChanged.connect(
+                lambda _layer, c=cls: self._on_landcover_layer_changed(c)
+            )
+            band_combo.currentIndexChanged.connect(
+                lambda _index, c=cls: self._fill_landcover_values(c)
+            )
+
+    def _update_landcover_ui_state(self, *_args):
+        """Per row: Source follows the checkbox; layer/band/value need Source = project (FR-1)."""
+        from .landcover import CLASSES, SOURCE_PROJECT
+
+        for cls in CLASSES:
+            checkbox, source_combo = self._landcover_row(cls)
+            ticked = checkbox.isChecked()
+            source_combo.setEnabled(ticked)
+            project = ticked and source_combo.currentData() == SOURCE_PROJECT
+            for widget in self._landcover_widgets(cls):
+                widget.setEnabled(project)
+
+    def _on_landcover_layer_changed(self, cls):
+        """A new layer resets the band to 1 and refills the class values."""
+        self._fill_landcover_bands(cls, band=1)
+        self._fill_landcover_values(cls)
+
+    def _fill_landcover_bands(self, cls, band=None):
+        """List the selected layer's bands; select ``band`` (or keep the current one)."""
+        layer_combo, band_combo, _ = self._landcover_widgets(cls)
+        layer = layer_combo.currentLayer()
+        keep = band if band is not None else band_combo.currentData()
+        band_combo.blockSignals(True)
+        try:
+            band_combo.clear()
+            if isinstance(layer, QgsRasterLayer):
+                for b in range(1, layer.bandCount() + 1):
+                    band_combo.addItem(layer.bandName(b) or "Band {}".format(b), b)
+                index = band_combo.findData(keep) if keep is not None else -1
+                band_combo.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            band_combo.blockSignals(False)
+
+    def _fill_landcover_values(self, cls):
+        """Offer the renderer's class values; keep what the user typed.
+
+        With nothing typed yet, the WorldCover code of the class (80 water, 50 built-up)
+        is preselected when the renderer has it.
+        """
+        from .landcover import FETCH_CLASS_VALUES
+
+        layer_combo, band_combo, value_combo = self._landcover_widgets(cls)
+        values = [str(v) for v in _renderer_class_values(
+            layer_combo.currentLayer(), band_combo.currentData()
+        )]
+        text = value_combo.currentText().strip()
+        if not text and str(FETCH_CLASS_VALUES[cls]) in values:
+            text = str(FETCH_CLASS_VALUES[cls])
+        value_combo.blockSignals(True)
+        try:
+            value_combo.clear()
+            value_combo.addItems(values)
+            value_combo.setEditText(text)
+        finally:
+            value_combo.blockSignals(False)
+
+    def _landcover_config_from_dialog(self):
+        """The land cover options as a plain ``LandcoverConfig`` (read once per run)."""
+        from .landcover import CLASSES, SOURCE_WORLDCOVER, ClassSpec, LandcoverConfig
+
+        classes = {}
+        for cls in CLASSES:
+            checkbox, source_combo = self._landcover_row(cls)
+            layer_combo, band_combo, value_combo = self._landcover_widgets(cls)
+            layer = layer_combo.currentLayer()
+            classes[cls] = ClassSpec(
+                enabled=checkbox.isChecked(),
+                source=source_combo.currentData() or SOURCE_WORLDCOVER,
+                layer_id=layer.id() if layer is not None else "",
+                band=band_combo.currentData() or 1,
+                value=value_combo.currentText().strip(),
+            )
+        return LandcoverConfig(classes=classes)
+
+    def _save_landcover_settings(self):
+        """Store the land cover options with QgsSettings (FR-9)."""
+        from qgis.core import QgsSettings
+
+        from .landcover import CLASSES
+
+        config = self._landcover_config_from_dialog()
+        settings = QgsSettings()
+        p = LANDCOVER_SETTINGS_PREFIX
+        for cls in CLASSES:
+            spec = config.classes[cls]
+            settings.setValue(p + cls + "/source", spec.source)
+            settings.setValue(p + cls + "/layer_id", spec.layer_id)
+            settings.setValue(p + cls + "/band", spec.band)
+            settings.setValue(p + cls + "/value", spec.value)
+
+    def _load_landcover_settings(self):
+        """Restore the land cover sources and layers; the class checkboxes start unticked.
+
+        A layer no longer in the project → not set.
+        """
+        from qgis.core import QgsSettings
+
+        from .landcover import CLASSES, SOURCE_WORLDCOVER
+
+        settings = QgsSettings()
+        p = LANDCOVER_SETTINGS_PREFIX
+        for cls in CLASSES:
+            checkbox, source_combo = self._landcover_row(cls)
+            # The check starts unticked on every open (DEC-23), like the overlap check;
+            # only the source and the user-layer choices are remembered.
+            checkbox.setChecked(False)
+            index = source_combo.findData(settings.value(p + cls + "/source", SOURCE_WORLDCOVER))
+            source_combo.setCurrentIndex(index if index >= 0 else source_combo.findData(SOURCE_WORLDCOVER))
+            layer_combo, _, value_combo = self._landcover_widgets(cls)
+            layer = QgsProject.instance().mapLayer(settings.value(p + cls + "/layer_id", "") or "")
+            if not isinstance(layer, QgsRasterLayer):
+                layer = None
+            layer_combo.blockSignals(True)
+            try:
+                layer_combo.setLayer(layer)
+            finally:
+                layer_combo.blockSignals(False)
+            self._fill_landcover_bands(cls, band=_setting_int(settings.value(p + cls + "/band", 1), 1))
+            stored = settings.value(p + cls + "/value", "")
+            value_combo.setEditText(str(stored) if stored not in (None, "") else "")
+            self._fill_landcover_values(cls)
+        self._update_landcover_ui_state()
+
+    # ------------------------------------------------------------------ #
+    # Land cover check: pipeline stage (SPEC-landcover-overlap)
+    # ------------------------------------------------------------------ #
+
+    def _run_landcover_check_guarded(self, output_path, final_fids, config):
+        """FR-8: run the check; any unexpected error becomes "not run (internal error)".
+
+        The traceback goes to the QGIS message log (DEC-12). The GeoJSON is only replaced
+        as the very last step of a successful check, so it is untouched on failure.
+        """
+        from .landcover import LandcoverOutcome
+
+        try:
+            return self._run_landcover_check(output_path, final_fids, config)
+        except Exception:
+            import traceback
+
+            from qgis.core import QgsMessageLog
+
+            QgsMessageLog.logMessage(
+                "Land cover check failed:\n" + traceback.format_exc(),
+                "TRACT Geolocation Formatter",
+                Qgis.MessageLevel.Critical,
+            )
+            return LandcoverOutcome.failed(self.tr("internal error"))
+
+    def _run_landcover_check(self, output_path, final_fids, config):
+        """Analyse the final GeoJSON and add the FR-10 overlap fields to it.
+
+        ``final_fids``: source feature id of each GeoJSON feature, in file order (the
+        validation report's ``feature_id``). Returns a ``LandcoverOutcome``. Expected
+        problems (cancel, unreachable bucket, invalid Project-mode class) become
+        statuses with a short reason; anything else raises to the guard.
+        """
+        from . import landcover as lc
+        from . import landcover_source as src
+
+        with open(output_path, encoding="utf-8") as fh:
+            fc = json.load(fh)
+        features = fc.get("features") or []
+        plots_layer, geometries = src.build_plots_layer(fc)
+        order = sorted(geometries)
+        areas = {idx: self._area_m2(geom) for idx, geom in geometries.items()}
+
+        def failed(reason):
+            out = lc.LandcoverOutcome.failed(reason)
+            out.n_plots = len(order)
+            return out
+
+        outcome = lc.LandcoverOutcome(n_plots=len(order))
+        histograms = {}
+        class_values = {}
+        sources = {}
+        coverage = {}
+
+        def not_run(classes, reason):
+            for cls in classes:
+                outcome.statuses[cls] = lc.STATUS_NOT_RUN
+                outcome.reasons[cls] = reason
+
+        # Per class (DEC-21): unticked → not checked; project-layer classes are
+        # validated here; WorldCover classes are handled together below.
+        extent = src.plots_extent(geometries)
+        rasters = {}
+        for cls in lc.CLASSES:
+            spec = config.classes.get(cls)
+            if spec is None or not spec.enabled:
+                outcome.statuses[cls] = lc.STATUS_NOT_CHECKED
+                continue
+            if spec.source == lc.SOURCE_WORLDCOVER:
+                continue
+            if not spec.layer_id:
+                not_run([cls], self.tr("no layer selected"))
+                continue
+            layer = QgsProject.instance().mapLayer(spec.layer_id)
+            if layer is None:
+                not_run([cls], self.tr("the selected layer is no longer in the project"))
+                continue
+            value, error, warning = src.validate_project_class(layer, spec.band, spec.value, extent)
+            if error:
+                not_run([cls], error.rstrip("."))
+                continue
+            if warning:
+                outcome.warnings.append(warning)
+                self.iface.messageBar().pushMessage(
+                    "TRACT Geolocation Formatter", warning,
+                    level=Qgis.MessageLevel.Warning, duration=8,
+                )
+            outcome.statuses[cls] = lc.STATUS_RAN
+            rasters[cls] = (layer, int(spec.band))
+            class_values[cls] = value
+            sources[cls] = lc.project_source_label(layer.name(), spec.band, value)
+            coverage[cls] = lc.project_coverage_label(layer.name(), spec.band)
+
+        # WorldCover classes: one tile resolution and one histogram, network only if
+        # needed. A failure here affects only these classes.
+        worldcover = config.classes_with_source(lc.SOURCE_WORLDCOVER)
+        if worldcover:
+            tiles = lc.tiles_for_bboxes(src.plot_bboxes(geometries))
+            if len(tiles) > lc.MAX_TILES_WITHOUT_CONFIRM and not self._confirm_many_landcover_tiles(len(tiles)):
+                not_run(worldcover, self.tr("cancelled"))
+            else:
+                ok = True
+                if tiles:
+                    with src.gdal_http_scope():
+                        try:
+                            raster_path, present, _missing = src.resolve_worldcover(tiles)
+                        except src.WorldCoverUnreachable:
+                            not_run(worldcover, self.tr("cannot reach WorldCover"))
+                            ok = False
+                        else:
+                            if raster_path:
+                                raster = QgsRasterLayer(raster_path, lc.LAYER_NAME, "gdal")
+                                if not raster.isValid():
+                                    not_run(worldcover, self.tr("WorldCover could not be opened"))
+                                    ok = False
+                                else:
+                                    histograms.update(self._landcover_histograms(
+                                        {cls: (raster, 1) for cls in worldcover}, plots_layer
+                                    ))
+                                    outcome.raster_path = raster_path
+                                    outcome.tiles = present
+                            # No tile at all: every plot is outside WorldCover → not assessed.
+                if ok:
+                    for cls in worldcover:
+                        outcome.statuses[cls] = lc.STATUS_RAN
+                        class_values[cls] = lc.FETCH_CLASS_VALUES[cls]
+                        sources[cls] = lc.SOURCE_FETCH
+                        coverage[cls] = lc.SOURCE_FETCH
+
+        # Project rasters are read outside the HTTP scope (local files).
+        if rasters:
+            histograms.update(self._landcover_histograms(rasters, plots_layer))
+
+        result = lc.compute_landcover(histograms, class_values, areas, plot_order=order)
+        outcome.result = result
+        outcome.sources = sources
+        outcome.coverage_sources = coverage
+
+        def prop(idx, key):
+            return ((features[idx] or {}).get("properties") or {}).get(key)
+
+        same_length = len(final_fids) == len(features)
+        outcome.plot_meta = {
+            "feature_ids": {idx: final_fids[idx] if same_length else "" for idx in order},
+            "node_ids": {idx: prop(idx, "NodeID") for idx in order},
+            "plot_ids": {idx: prop(idx, "PlotID") for idx in order},
+        }
+
+        # FR-10: add the fields of the classes that ran; no rewrite if none ran.
+        if result.classes and order:
+            for idx, values in lc.geojson_properties(result).items():
+                feature = features[idx]
+                if feature.get("properties") is None:
+                    feature["properties"] = {}
+                feature["properties"].update(values)
+            self._replace_json_file(output_path, fc)
+        return outcome
+
+    def _replace_json_file(self, path, data):
+        """Write ``data`` to a temp file next to ``path``, then swap it in (FR-8).
+
+        On any failure the original file is left as it was and the temp file removed.
+        """
+        tmp = path + ".landcover.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(data, fh)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+
+    def _add_worldcover_layer(self, raster_path, run_layer_ids):
+        """Add the styled WorldCover layer below this run's layers; log on failure."""
+        try:
+            from .landcover_source import add_worldcover_layer
+
+            existing = [lid for lid in run_layer_ids if QgsProject.instance().mapLayer(lid)]
+            add_worldcover_layer(raster_path, existing)
+        except Exception:
+            import traceback
+
+            from qgis.core import QgsMessageLog
+
+            QgsMessageLog.logMessage(
+                "WorldCover layer could not be added:\n" + traceback.format_exc(),
+                "TRACT Geolocation Formatter",
+                Qgis.MessageLevel.Warning,
+            )
+
+    def _confirm_many_landcover_tiles(self, count):
+        """FR-4.1: ask before reading more than 12 WorldCover tiles."""
+        answer = QMessageBox.question(
+            self.iface.mainWindow(),
+            self.tr("TRACT Geolocation Formatter"),
+            self.tr(
+                "The plots are spread over {} WorldCover tiles (3x3 degrees each). "
+                "Reading them can take a while. Continue with the land cover check?"
+            ).format(count),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _landcover_histograms(self, rasters, plots_layer):
+        """Zonal histograms with a message-bar progress bar (NFR responsiveness)."""
+        from qgis.core import QgsProcessingFeedback
+
+        from . import landcover_source as src
+
+        progress_message = self.iface.messageBar().createMessage(
+            "TRACT Geolocation Formatter:  Checking land cover overlaps..."
+        )
+        progress = QProgressBar()
+        progress.setMaximum(100)
+        progress.setValue(0)
+        progress.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        progress_message.layout().addWidget(progress)
+        progress_item = self.iface.messageBar().pushWidget(progress_message, Qgis.MessageLevel.Info)
+
+        feedback = QgsProcessingFeedback()
+
+        def on_progress(value):
+            progress.setValue(int(value))
+            QApplication.processEvents()
+
+        feedback.progressChanged.connect(on_progress)
+        try:
+            return src.histograms_for_classes(rasters, plots_layer, feedback)
+        finally:
+            self.iface.messageBar().popWidget(progress_item)
+
+    def _landcover_report_lines(self, outcome, n_written):
+        """FR-7: the two SUMMARY lines, one per class."""
+        from .landcover import BUILT_UP, STATUS_NOT_CHECKED, STATUS_RAN, WATER
+
+        lines = []
+        for cls, label in ((WATER, self.tr("Water overlap")), (BUILT_UP, self.tr("Built-up overlap"))):
+            status = outcome.statuses.get(cls)
+            if status == STATUS_RAN and outcome.result is not None:
+                lines.append(self.tr("{0}: {1} of {2} plots").format(
+                    label, outcome.result.count(cls), n_written))
+            elif status == STATUS_NOT_CHECKED:
+                lines.append(self.tr("{0}: not checked").format(label))
+            else:
+                lines.append(self.tr("{0}: not run ({1})").format(
+                    label, outcome.reasons.get(cls) or self.tr("internal error")))
+        return lines
+
+    def _write_landcover_csv(self, output_path, outcome):
+        """FR-6: ``<base>_landcover_overlaps.csv``; returns its path, or None on failure."""
+        import csv
+
+        from .landcover import CSV_FIELDNAMES, csv_rows
+
+        path = os.path.splitext(output_path)[0] + "_landcover_overlaps.csv"
+        meta = outcome.plot_meta
+        rows = csv_rows(
+            outcome.result,
+            meta.get("feature_ids", {}),
+            meta.get("node_ids", {}),
+            meta.get("plot_ids", {}),
+            outcome.sources,
+            outcome.coverage_sources,
+        )
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=CSV_FIELDNAMES)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow(row)
+        except Exception as e:
+            self.iface.messageBar().pushMessage(
+                "TRACT Geolocation Formatter",
+                self.tr("The land cover CSV could not be written: {}").format(e),
+                level=Qgis.MessageLevel.Warning, duration=8,
+            )
+            return None
+        return path
 
     def _populate_country_combo(self):
         """Populate the country dropdown from the bundled TRACT template (GH-6, DEC-3, DEC-9).
@@ -1181,12 +1739,14 @@ class TractGeolocationFormatter:
 
         return separator.join(parts)
 
-    def _build_output_fields(self, layer_fields, excluded_fields):
+    def _build_output_fields(self, layer_fields, excluded_fields, extra_reserved=()):
         """
         Build the output QgsFields from the input layer fields plus TRACT fields.
 
         - Fields in `excluded_fields` are skipped (mapped to NodeID/PlotID via "Use existing field").
-        - Fields whose name clashes with a TRACT field name get an '_orig' suffix.
+        - Fields whose name clashes with a TRACT field name, or with a name in
+          `extra_reserved` (the land cover overlap fields when that check is on,
+          SPEC-landcover-overlap FR-10), get an '_orig' suffix.
         - The four TRACT fields are always appended at the end.
 
         Returns:
@@ -1194,6 +1754,7 @@ class TractGeolocationFormatter:
         """
         out_fields = QgsFields()
         rename_map = {}
+        reserved = set(TRACT_FIELD_NAMES) | set(extra_reserved)
 
         for field in layer_fields:
             name = field.name()
@@ -1201,7 +1762,7 @@ class TractGeolocationFormatter:
             if name in excluded_fields:
                 continue
 
-            if name in TRACT_FIELD_NAMES:
+            if name in reserved:
                 new_name = f"{name}_orig"
                 rename_map[name] = new_name
                 out_fields.append(QgsField(new_name, field.type()))
@@ -2367,6 +2928,9 @@ class TractGeolocationFormatter:
         overlap_enabled = self.dlg.overlapCheckBox.isChecked()
         overlap_min_pct = self.dlg.overlapThresholdSpin.value()
 
+        # Land cover check (SPEC-landcover-overlap): options read once for this run.
+        landcover_config = self._landcover_config_from_dialog()
+
         # Output path
         output_path = self.dlg.outputPathLineEdit.text().strip()
         if not output_path:
@@ -2443,7 +3007,12 @@ class TractGeolocationFormatter:
             excluded_fields.add(plot_field_name)
 
         # Output fields: original layer fields (with exclusion/rename) + TRACT fields
-        out_fields, rename_map = self._build_output_fields(layer.fields(), excluded_fields)
+        landcover_reserved = ()
+        if landcover_config.enabled:
+            from .landcover import ALL_FIELD_NAMES as landcover_reserved
+        out_fields, rename_map = self._build_output_fields(
+            layer.fields(), excluded_fields, landcover_reserved
+        )
 
         # TRACT accepts Z values, so the output keeps the layer's own
         # dimensionality instead of being forced down to a 2D WKB type.
@@ -3053,6 +3622,17 @@ class TractGeolocationFormatter:
                         nid for nid in overlap_result["final_node_ids"] if nid
                     )
 
+        # SPEC-landcover-overlap: land cover check on the final GeoJSON — after the GH-12
+        # fixes and deletions, before the layer is loaded and the file is split, so both
+        # carry the overlap fields. One guard: nothing here can fail the export (FR-8).
+        landcover_outcome = None
+        if landcover_config.enabled:
+            deleted_fids = set(overlap_result["deleted_fids"]) if overlap_result else set()
+            final_fids = [fid for fid in written_fids if fid not in deleted_fids]
+            landcover_outcome = self._run_landcover_check_guarded(
+                output_path, final_fids, landcover_config
+            )
+
         # GH-12 FR-11: overlaps file, written whenever there is any finding
         # (below-threshold ones included). Split never touches it.
         overlap_records = []
@@ -3080,15 +3660,18 @@ class TractGeolocationFormatter:
         # Load output layer into QGIS
         layer_name = os.path.basename(output_path)
         output_layer = QgsVectorLayer(output_path, layer_name, "ogr")
+        run_layer_ids = []  # SPEC-landcover-overlap: the WorldCover group goes below these
 
         if output_layer.isValid():
             QgsProject.instance().addMapLayer(output_layer)
+            run_layer_ids.append(output_layer.id())
             if overlaps_path:
                 overlaps_layer = QgsVectorLayer(
                     overlaps_path, os.path.basename(overlaps_path), "ogr"
                 )
                 if overlaps_layer.isValid():
                     QgsProject.instance().addMapLayer(overlaps_layer)
+                    run_layer_ids.append(overlaps_layer.id())
         else:
             self.iface.messageBar().pushMessage(
                 "TRACT Geolocation Formatter",
@@ -3168,6 +3751,12 @@ class TractGeolocationFormatter:
                 self.tr("{} found; see the overlaps file.")
                 .format(_plural(len(overlap_records), "overlap"))
             )
+        if landcover_outcome is not None:
+            # FR-7: exactly two lines, whatever happened to the check.
+            for line in self._landcover_report_lines(
+                landcover_outcome, written_count - deleted_count
+            ):
+                report.bullet(line)
 
         # SPEC-fix-holes: summarize hole handling for this run.
         if self._hole_stats["with_holes"] > 0:
@@ -3392,6 +3981,11 @@ class TractGeolocationFormatter:
                 for row in validation_rows:
                     writer.writerow(row)
 
+        # SPEC-landcover-overlap FR-6: separate CSV, only when a class ran.
+        landcover_csv_path = None
+        if landcover_outcome is not None and landcover_outcome.classes_ran():
+            landcover_csv_path = self._write_landcover_csv(output_path, landcover_outcome)
+
         # GH-6: optional Master Data XLSX write — runs after GeoJSON + CSV report
         # are produced. Failure here surfaces as a warning but does NOT mark the
         # whole export as failed (the primary outputs are already on disk).
@@ -3453,6 +4047,7 @@ class TractGeolocationFormatter:
                     split_layer = QgsVectorLayer(path, os.path.basename(path), "ogr")
                     if split_layer.isValid():
                         QgsProject.instance().addMapLayer(split_layer)
+                        run_layer_ids.append(split_layer.id())
                     else:
                         self.iface.messageBar().pushMessage(
                             "TRACT Geolocation Formatter",
@@ -3479,6 +4074,12 @@ class TractGeolocationFormatter:
                         .format(output_path, e)
                     )
 
+        # SPEC-landcover-overlap FR-4: WorldCover map layer (a class used WorldCover), added last so
+        # it sits below every layer of this run. A failure only logs: the fields and
+        # the CSV are already written.
+        if landcover_outcome is not None and landcover_outcome.raster_path:
+            self._add_worldcover_layer(landcover_outcome.raster_path, run_layer_ids)
+
         # FILES — every produced path, in one aligned block.
         file_rows = []
         if not split_removed_full_output:
@@ -3495,6 +4096,8 @@ class TractGeolocationFormatter:
             file_rows.append((self.tr("Master Data"), master_data_written))
         if overlaps_path and os.path.exists(overlaps_path):
             file_rows.append((self.tr("Overlaps"), overlaps_path))
+        if landcover_csv_path:
+            file_rows.append((self.tr("Land cover overlaps"), landcover_csv_path))
 
         if file_rows:
             report.section(self.tr("FILES"))
