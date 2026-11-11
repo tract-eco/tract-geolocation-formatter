@@ -19,7 +19,7 @@ from tract_geolocation_formatter import landcover as lc  # noqa: E402
 from tract_geolocation_formatter.landcover import (  # noqa: E402
     BUILT_UP,
     CSV_FIELDNAMES,
-    NOT_ASSESSED,
+    NO_COVERAGE,
     WATER,
     compute_landcover,
     csv_rows,
@@ -130,16 +130,16 @@ class ComputeTests(unittest.TestCase):
         import inspect
         self.assertNotIn("threshold", str(inspect.signature(compute_landcover)))
 
-    def test_ac10_not_assessed_and_sub_pixel(self):
+    def test_ac10_no_coverage_and_sub_pixel(self):
         """AC-10: total 0 → not assessed (None); a one-pixel water plot → 100 %."""
         hist = {0: {}, 1: {80: 1}}
         r = compute_landcover({WATER: hist}, {WATER: 80}, {0: 50.0, 1: 30.0})
         self.assertIsNone(r.values[WATER][0])
-        self.assertEqual(r.not_assessed(WATER), [0])
+        self.assertEqual(r.no_coverage(WATER), [0])
         self.assertAlmostEqual(r.values[WATER][1][0], 100.0)
         self.assertAlmostEqual(r.values[WATER][1][1], 30.0)
 
-    def test_plot_missing_from_histogram_is_not_assessed(self):
+    def test_plot_missing_from_histogram_is_no_coverage(self):
         r = compute_landcover({WATER: {}}, {WATER: 80}, {3: 100.0})
         self.assertIsNone(r.values[WATER][3])
 
@@ -181,8 +181,8 @@ class GeojsonPropertiesTests(unittest.TestCase):
         self.assertEqual(props[1]["BuiltUpOverlap_pct"], 25.0)
         self.assertEqual(props[3]["WaterOverlap_pct"], 0.0)
 
-    def test_ac31_not_assessed_is_null(self):
-        """AC-31: a not_assessed plot gets null in all four fields."""
+    def test_ac31_no_coverage_is_null(self):
+        """AC-31: a no_coverage plot gets null in all four fields."""
         props = geojson_properties(self._result())
         self.assertEqual(set(props[2].values()), {None})
         self.assertEqual(len(props[2]), 4)
@@ -231,17 +231,17 @@ class CsvRowsTests(unittest.TestCase):
         rows = self._rows()
         self.assertEqual(
             [(r["feature_id"], r["class"]) for r in rows],
-            [(10, WATER), (11, WATER), (11, BUILT_UP), (12, NOT_ASSESSED)],
+            [(10, WATER), (11, WATER), (11, BUILT_UP), (12, NO_COVERAGE)],
         )
 
-    def test_empty_plot_id_and_not_assessed_blanks(self):
+    def test_empty_plot_id_and_no_coverage_blanks(self):
         rows = self._rows()
         self.assertEqual(rows[1]["PlotID"], "")
         na = rows[3]
         self.assertEqual((na["overlap_area_m2"], na["overlap_pct"]), ("", ""))
         self.assertEqual(na["plot_area_m2"], "99.0")
 
-    def test_not_assessed_one_row_per_distinct_source(self):
+    def test_no_coverage_one_row_per_distinct_source(self):
         r = compute_landcover(
             {WATER: {0: {}}, BUILT_UP: {0: {}}}, {WATER: 1, BUILT_UP: 2}, {0: 5.0}
         )
@@ -250,8 +250,8 @@ class CsvRowsTests(unittest.TestCase):
         diff = csv_rows(r, {0: 1}, {}, {}, {WATER: "A, band 1, value 1", BUILT_UP: "B, band 2, value 2"})
         self.assertEqual([x["source"] for x in diff], ["A, band 1, value 1", "B, band 2, value 2"])
 
-    def test_not_assessed_dedup_by_coverage_source(self):
-        """Same raster and band, different class values → one not_assessed row (DEC-14)."""
+    def test_no_coverage_dedup_by_coverage_source(self):
+        """Same raster and band, different class values → one no_coverage row (DEC-14)."""
         r = compute_landcover(
             {WATER: {0: {}}, BUILT_UP: {0: {}}}, {WATER: 80, BUILT_UP: 50}, {0: 5.0}
         )
@@ -259,7 +259,7 @@ class CsvRowsTests(unittest.TestCase):
             r, {0: 1}, {}, {}, {WATER: "lc, band 1, value 80", BUILT_UP: "lc, band 1, value 50"},
             coverage_sources={WATER: "lc, band 1", BUILT_UP: "lc, band 1"},
         )
-        self.assertEqual([(x["class"], x["source"]) for x in rows], [(NOT_ASSESSED, "lc, band 1")])
+        self.assertEqual([(x["class"], x["source"]) for x in rows], [(NO_COVERAGE, "lc, band 1")])
         self.assertEqual(lc.project_coverage_label("lc", 2), "lc, band 2")
 
     def test_no_overlap_gives_no_rows(self):
@@ -288,6 +288,18 @@ class OutcomeTests(unittest.TestCase):
     def test_classes_ran(self):
         o = lc.LandcoverOutcome(statuses={WATER: lc.STATUS_RAN, BUILT_UP: lc.STATUS_NOT_CHECKED})
         self.assertEqual(o.classes_ran(), (WATER,))
+
+    def test_config_enabled_and_sources(self):
+        """DEC-21: the check is on when any class is ticked; sources are per class."""
+        cfg = lc.LandcoverConfig(classes={
+            WATER: lc.ClassSpec(enabled=True, source=lc.SOURCE_PROJECT, layer_id="L"),
+            BUILT_UP: lc.ClassSpec(enabled=False),
+        })
+        self.assertTrue(cfg.enabled)
+        self.assertEqual(cfg.classes_with_source(lc.SOURCE_PROJECT), [WATER])
+        self.assertEqual(cfg.classes_with_source(lc.SOURCE_WORLDCOVER), [])
+        self.assertFalse(lc.LandcoverConfig(classes={WATER: lc.ClassSpec()}).enabled)
+        self.assertFalse(lc.LandcoverConfig().enabled)
 
     def test_project_source_label(self):
         self.assertEqual(lc.project_source_label("lc.tif", 2, 7), "lc.tif, band 2, value 7")

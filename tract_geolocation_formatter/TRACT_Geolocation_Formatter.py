@@ -593,13 +593,6 @@ def _raster_layer_filter():
         return QgsMapLayerProxyModel.RasterLayer
 
 
-def _setting_bool(value):
-    """QSettings may hand back a bool, an int or the strings 'true'/'false'."""
-    if isinstance(value, str):
-        return value.strip().lower() in ("true", "1", "yes")
-    return bool(value)
-
-
 def _setting_int(value, default):
     try:
         return int(value)
@@ -992,13 +985,25 @@ class TractGeolocationFormatter:
             self.dlg.landcoverBuiltUpValueCombo,
         )
 
-    def _connect_landcover_signals(self):
-        """One-time setup of the land cover controls (filters, validators, signals)."""
-        from .landcover import CLASSES
+    def _landcover_row(self, cls):
+        """(checkbox, source combo) of a class row (DEC-21)."""
+        from .landcover import WATER
 
-        self.dlg.landcoverCheckBox.toggled.connect(self._update_landcover_ui_state)
-        self.dlg.landcoverFetchRadio.toggled.connect(self._update_landcover_ui_state)
+        if cls == WATER:
+            return self.dlg.landcoverWaterCheckBox, self.dlg.landcoverWaterSourceCombo
+        return self.dlg.landcoverBuiltUpCheckBox, self.dlg.landcoverBuiltUpSourceCombo
+
+    def _connect_landcover_signals(self):
+        """One-time setup of the land cover controls (sources, filters, validators, signals)."""
+        from .landcover import CLASSES, SOURCE_PROJECT, SOURCE_WORLDCOVER
+
         for cls in CLASSES:
+            checkbox, source_combo = self._landcover_row(cls)
+            source_combo.clear()
+            source_combo.addItem(self.tr("ESA WorldCover 2021"), SOURCE_WORLDCOVER)
+            source_combo.addItem(self.tr("User layer"), SOURCE_PROJECT)
+            checkbox.toggled.connect(self._update_landcover_ui_state)
+            source_combo.currentIndexChanged.connect(self._update_landcover_ui_state)
             layer_combo, band_combo, value_combo = self._landcover_widgets(cls)
             layer_combo.setFilters(_raster_layer_filter())
             layer_combo.setAllowEmptyLayer(True)
@@ -1010,13 +1015,17 @@ class TractGeolocationFormatter:
                 lambda _index, c=cls: self._fill_landcover_values(c)
             )
 
-    def _update_landcover_ui_state(self):
-        """Controls follow the checkbox; the class rows only in Project mode (FR-1)."""
-        enabled = self.dlg.landcoverCheckBox.isChecked()
-        self.dlg.landcoverContainer.setEnabled(enabled)
-        self.dlg.landcoverClassesWidget.setEnabled(
-            enabled and self.dlg.landcoverProjectRadio.isChecked()
-        )
+    def _update_landcover_ui_state(self, *_args):
+        """Per row: Source follows the checkbox; layer/band/value need Source = project (FR-1)."""
+        from .landcover import CLASSES, SOURCE_PROJECT
+
+        for cls in CLASSES:
+            checkbox, source_combo = self._landcover_row(cls)
+            ticked = checkbox.isChecked()
+            source_combo.setEnabled(ticked)
+            project = ticked and source_combo.currentData() == SOURCE_PROJECT
+            for widget in self._landcover_widgets(cls):
+                widget.setEnabled(project)
 
     def _on_landcover_layer_changed(self, cls):
         """A new layer resets the band to 1 and refills the class values."""
@@ -1064,28 +1073,21 @@ class TractGeolocationFormatter:
 
     def _landcover_config_from_dialog(self):
         """The land cover options as a plain ``LandcoverConfig`` (read once per run)."""
-        from .landcover import (
-            CLASSES,
-            MODE_FETCH,
-            MODE_PROJECT,
-            ClassSpec,
-            LandcoverConfig,
-        )
+        from .landcover import CLASSES, SOURCE_WORLDCOVER, ClassSpec, LandcoverConfig
 
         classes = {}
         for cls in CLASSES:
+            checkbox, source_combo = self._landcover_row(cls)
             layer_combo, band_combo, value_combo = self._landcover_widgets(cls)
             layer = layer_combo.currentLayer()
-            classes[cls] = (
-                ClassSpec(layer.id(), band_combo.currentData() or 1, value_combo.currentText().strip())
-                if layer is not None
-                else None
+            classes[cls] = ClassSpec(
+                enabled=checkbox.isChecked(),
+                source=source_combo.currentData() or SOURCE_WORLDCOVER,
+                layer_id=layer.id() if layer is not None else "",
+                band=band_combo.currentData() or 1,
+                value=value_combo.currentText().strip(),
             )
-        return LandcoverConfig(
-            enabled=self.dlg.landcoverCheckBox.isChecked(),
-            mode=MODE_PROJECT if self.dlg.landcoverProjectRadio.isChecked() else MODE_FETCH,
-            classes=classes,
-        )
+        return LandcoverConfig(classes=classes)
 
     def _save_landcover_settings(self):
         """Store the land cover options with QgsSettings (FR-9)."""
@@ -1096,27 +1098,31 @@ class TractGeolocationFormatter:
         config = self._landcover_config_from_dialog()
         settings = QgsSettings()
         p = LANDCOVER_SETTINGS_PREFIX
-        settings.setValue(p + "enabled", config.enabled)
-        settings.setValue(p + "mode", config.mode)
         for cls in CLASSES:
-            spec = config.classes.get(cls)
-            settings.setValue(p + cls + "/layer_id", spec.layer_id if spec else "")
-            settings.setValue(p + cls + "/band", spec.band if spec else 1)
-            settings.setValue(p + cls + "/value", spec.value if spec else "")
+            spec = config.classes[cls]
+            settings.setValue(p + cls + "/source", spec.source)
+            settings.setValue(p + cls + "/layer_id", spec.layer_id)
+            settings.setValue(p + cls + "/band", spec.band)
+            settings.setValue(p + cls + "/value", spec.value)
 
     def _load_landcover_settings(self):
-        """Restore the land cover options; a layer no longer in the project → not set."""
+        """Restore the land cover sources and layers; the class checkboxes start unticked.
+
+        A layer no longer in the project → not set.
+        """
         from qgis.core import QgsSettings
 
-        from .landcover import CLASSES, MODE_PROJECT
+        from .landcover import CLASSES, SOURCE_WORLDCOVER
 
         settings = QgsSettings()
         p = LANDCOVER_SETTINGS_PREFIX
-        self.dlg.landcoverCheckBox.setChecked(_setting_bool(settings.value(p + "enabled", False)))
-        project_mode = settings.value(p + "mode", "") == MODE_PROJECT
-        self.dlg.landcoverProjectRadio.setChecked(project_mode)
-        self.dlg.landcoverFetchRadio.setChecked(not project_mode)
         for cls in CLASSES:
+            checkbox, source_combo = self._landcover_row(cls)
+            # The check starts unticked on every open (DEC-23), like the overlap check;
+            # only the source and the user-layer choices are remembered.
+            checkbox.setChecked(False)
+            index = source_combo.findData(settings.value(p + cls + "/source", SOURCE_WORLDCOVER))
+            source_combo.setCurrentIndex(index if index >= 0 else source_combo.findData(SOURCE_WORLDCOVER))
             layer_combo, _, value_combo = self._landcover_widgets(cls)
             layer = QgsProject.instance().mapLayer(settings.value(p + cls + "/layer_id", "") or "")
             if not isinstance(layer, QgsRasterLayer):
@@ -1187,61 +1193,84 @@ class TractGeolocationFormatter:
         sources = {}
         coverage = {}
 
-        if config.mode == lc.MODE_FETCH:
+        def not_run(classes, reason):
+            for cls in classes:
+                outcome.statuses[cls] = lc.STATUS_NOT_RUN
+                outcome.reasons[cls] = reason
+
+        # Per class (DEC-21): unticked → not checked; project-layer classes are
+        # validated here; WorldCover classes are handled together below.
+        extent = src.plots_extent(geometries)
+        rasters = {}
+        for cls in lc.CLASSES:
+            spec = config.classes.get(cls)
+            if spec is None or not spec.enabled:
+                outcome.statuses[cls] = lc.STATUS_NOT_CHECKED
+                continue
+            if spec.source == lc.SOURCE_WORLDCOVER:
+                continue
+            if not spec.layer_id:
+                not_run([cls], self.tr("no layer selected"))
+                continue
+            layer = QgsProject.instance().mapLayer(spec.layer_id)
+            if layer is None:
+                not_run([cls], self.tr("the selected layer is no longer in the project"))
+                continue
+            value, error, warning = src.validate_project_class(layer, spec.band, spec.value, extent)
+            if error:
+                not_run([cls], error.rstrip("."))
+                continue
+            if warning:
+                outcome.warnings.append(warning)
+                self.iface.messageBar().pushMessage(
+                    "TRACT Geolocation Formatter", warning,
+                    level=Qgis.MessageLevel.Warning, duration=8,
+                )
+            outcome.statuses[cls] = lc.STATUS_RAN
+            rasters[cls] = (layer, int(spec.band))
+            class_values[cls] = value
+            sources[cls] = lc.project_source_label(layer.name(), spec.band, value)
+            coverage[cls] = lc.project_coverage_label(layer.name(), spec.band)
+
+        # WorldCover classes: one tile resolution and one histogram, network only if
+        # needed. A failure here affects only these classes.
+        worldcover = config.classes_with_source(lc.SOURCE_WORLDCOVER)
+        if worldcover:
             tiles = lc.tiles_for_bboxes(src.plot_bboxes(geometries))
             if len(tiles) > lc.MAX_TILES_WITHOUT_CONFIRM and not self._confirm_many_landcover_tiles(len(tiles)):
-                return failed(self.tr("cancelled"))
-            if tiles:
-                with src.gdal_http_scope():
-                    try:
-                        raster_path, present, _missing = src.resolve_worldcover(tiles)
-                    except src.WorldCoverUnreachable:
-                        return failed(self.tr("cannot reach WorldCover"))
-                    if raster_path:
-                        raster = QgsRasterLayer(raster_path, lc.LAYER_NAME, "gdal")
-                        if not raster.isValid():
-                            return failed(self.tr("WorldCover could not be opened"))
-                        histograms = self._landcover_histograms(
-                            {cls: (raster, 1) for cls in lc.CLASSES}, plots_layer
-                        )
-                        outcome.raster_path = raster_path
-                        outcome.tiles = present
-                    # No tile at all: every plot is outside WorldCover → not assessed.
-            for cls in lc.CLASSES:
-                outcome.statuses[cls] = lc.STATUS_RAN
-                class_values[cls] = lc.FETCH_CLASS_VALUES[cls]
-                sources[cls] = lc.SOURCE_FETCH
-        else:
-            extent = src.plots_extent(geometries)
-            rasters = {}
-            for cls in lc.CLASSES:
-                spec = config.classes.get(cls)
-                if spec is None:
-                    outcome.statuses[cls] = lc.STATUS_NOT_CHECKED
-                    continue
-                layer = QgsProject.instance().mapLayer(spec.layer_id)
-                if layer is None:
-                    outcome.statuses[cls] = lc.STATUS_NOT_RUN
-                    outcome.reasons[cls] = self.tr("the selected layer is no longer in the project")
-                    continue
-                value, error, warning = src.validate_project_class(layer, spec.band, spec.value, extent)
-                if error:
-                    outcome.statuses[cls] = lc.STATUS_NOT_RUN
-                    outcome.reasons[cls] = error.rstrip(".")
-                    continue
-                if warning:
-                    outcome.warnings.append(warning)
-                    self.iface.messageBar().pushMessage(
-                        "TRACT Geolocation Formatter", warning,
-                        level=Qgis.MessageLevel.Warning, duration=8,
-                    )
-                outcome.statuses[cls] = lc.STATUS_RAN
-                rasters[cls] = (layer, int(spec.band))
-                class_values[cls] = value
-                sources[cls] = lc.project_source_label(layer.name(), spec.band, value)
-                coverage[cls] = lc.project_coverage_label(layer.name(), spec.band)
-            if rasters:
-                histograms = self._landcover_histograms(rasters, plots_layer)
+                not_run(worldcover, self.tr("cancelled"))
+            else:
+                ok = True
+                if tiles:
+                    with src.gdal_http_scope():
+                        try:
+                            raster_path, present, _missing = src.resolve_worldcover(tiles)
+                        except src.WorldCoverUnreachable:
+                            not_run(worldcover, self.tr("cannot reach WorldCover"))
+                            ok = False
+                        else:
+                            if raster_path:
+                                raster = QgsRasterLayer(raster_path, lc.LAYER_NAME, "gdal")
+                                if not raster.isValid():
+                                    not_run(worldcover, self.tr("WorldCover could not be opened"))
+                                    ok = False
+                                else:
+                                    histograms.update(self._landcover_histograms(
+                                        {cls: (raster, 1) for cls in worldcover}, plots_layer
+                                    ))
+                                    outcome.raster_path = raster_path
+                                    outcome.tiles = present
+                            # No tile at all: every plot is outside WorldCover → not assessed.
+                if ok:
+                    for cls in worldcover:
+                        outcome.statuses[cls] = lc.STATUS_RAN
+                        class_values[cls] = lc.FETCH_CLASS_VALUES[cls]
+                        sources[cls] = lc.SOURCE_FETCH
+                        coverage[cls] = lc.SOURCE_FETCH
+
+        # Project rasters are read outside the HTTP scope (local files).
+        if rasters:
+            histograms.update(self._landcover_histograms(rasters, plots_layer))
 
         result = lc.compute_landcover(histograms, class_values, areas, plot_order=order)
         outcome.result = result
@@ -4045,7 +4074,7 @@ class TractGeolocationFormatter:
                         .format(output_path, e)
                     )
 
-        # SPEC-landcover-overlap FR-4: WorldCover map layer (Fetch mode), added last so
+        # SPEC-landcover-overlap FR-4: WorldCover map layer (a class used WorldCover), added last so
         # it sits below every layer of this run. A failure only logs: the fields and
         # the CSV are already written.
         if landcover_outcome is not None and landcover_outcome.raster_path:

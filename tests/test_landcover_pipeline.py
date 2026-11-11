@@ -140,17 +140,26 @@ class LandcoverPipelineTests(unittest.TestCase):
         d.splitCheckBox.setChecked(bool(split))
         if split:
             d.splitCountSpin.setValue(split)
-        d.landcoverCheckBox.setChecked(landcover is not None)
-        if landcover is not None:
-            project = landcover.get("mode", "project") == "project"
-            d.landcoverProjectRadio.setChecked(project)
-            d.landcoverFetchRadio.setChecked(not project)
-            for cls, prefix in (("water", "landcoverWater"), ("built_up", "landcoverBuiltUp")):
-                spec = landcover.get(cls)
-                getattr(d, prefix + "LayerCombo").setLayer(spec[0] if spec else None)
-                if spec:
-                    getattr(d, prefix + "BandCombo").setCurrentIndex(spec[1] - 1)
-                    getattr(d, prefix + "ValueCombo").setEditText(str(spec[2]))
+        # ``landcover``: None = nothing ticked. Otherwise per class (DEC-21):
+        # None = unticked, "worldcover", or (layer|None, band, value) = project layer.
+        # {"mode": "fetch"} ticks both classes on WorldCover; "mode": "project" with
+        # tuples is the old shorthand and still reads the same.
+        landcover = landcover or {}
+        default = "worldcover" if landcover.get("mode") == "fetch" else None
+        for cls, prefix in (("water", "landcoverWater"), ("built_up", "landcoverBuiltUp")):
+            spec = landcover.get(cls, default)
+            getattr(d, prefix + "CheckBox").setChecked(spec is not None)
+            source = getattr(d, prefix + "SourceCombo")
+            if spec is None:
+                continue
+            if spec == "worldcover":
+                source.setCurrentIndex(source.findData("worldcover"))
+                continue
+            source.setCurrentIndex(source.findData("project"))
+            getattr(d, prefix + "LayerCombo").setLayer(spec[0])
+            if spec[0] is not None:
+                getattr(d, prefix + "BandCombo").setCurrentIndex(spec[1] - 1)
+            getattr(d, prefix + "ValueCombo").setEditText(str(spec[2]))
         boxes = []
         stub = staticmethod(lambda *a, **k: boxes.append(a[2] if len(a) > 2 else "") or 0)
         with mock.patch.object(M.QMessageBox, "warning", stub), \
@@ -234,13 +243,13 @@ class LandcoverPipelineTests(unittest.TestCase):
         rows = self._csv_rows(res["csv"])
         self.assertEqual(
             [(r["PlotID"], r["class"]) for r in rows],
-            [("P0", "water"), ("P1", "built_up"), ("P2", "water"), ("P3", "not_assessed"),
-             ("P4", "water"), ("P4", "built_up")],  # one not_assessed row (shared raster)
+            [("P0", "water"), ("P1", "built_up"), ("P2", "water"), ("P3", "no_coverage"),
+             ("P4", "water"), ("P4", "built_up")],  # one no_coverage row (shared raster)
         )
         self.assertTrue(all(r["feature_id"] != "" for r in rows))
         self.assertEqual(rows[0]["source"], "classes, band 1, value 80")
         self.assertEqual(rows[1]["source"], "classes, band 1, value 50")
-        self.assertEqual(rows[3]["source"], "classes, band 1")  # not_assessed: raster + band
+        self.assertEqual(rows[3]["source"], "classes, band 1")  # no_coverage: raster + band
 
     def test_ac25_no_overlaps_header_only(self):
         res = self._run(self._both(water_value=99, built_value=98), plots=[0, 1, 2, 4])
@@ -369,10 +378,13 @@ class LandcoverPipelineTests(unittest.TestCase):
                                             "Built-up overlap: not run (cannot reach WorldCover)"])
 
     def _fetch_with_local_raster(self, **kwargs):
-        """Fetch mode with the fixture raster standing in for WorldCover (offline)."""
+        """Both classes on WorldCover, the fixture raster standing in for it (offline)."""
+        return self._fetch_with_local_raster_spec({"mode": "fetch"}, **kwargs)
+
+    def _fetch_with_local_raster_spec(self, landcover, **kwargs):
         fake = lambda tiles, *a, **k: (self.fx["main"], [tiles[0]], tiles[1:])  # noqa: E731
         with mock.patch("tract_geolocation_formatter.landcover_source.resolve_worldcover", fake):
-            return self._run({"mode": "fetch"}, **kwargs)
+            return self._run(landcover, **kwargs)
 
     def _group(self):
         from qgis.core import QgsProject
@@ -404,7 +416,7 @@ class LandcoverPipelineTests(unittest.TestCase):
                                                 "Built-up overlap: 2 of 5 plots"])
             rows = self._csv_rows(res["csv"])
             self.assertEqual(rows[0]["source"], "ESA WorldCover 2021 v200")
-            self.assertIn(("P3", "not_assessed"), [(r["PlotID"], r["class"]) for r in rows])
+            self.assertIn(("P3", "no_coverage"), [(r["PlotID"], r["class"]) for r in rows])
             group = self._group()
             self.assertIsNotNone(group)
             layers = group.findLayers()
@@ -454,6 +466,72 @@ class LandcoverPipelineTests(unittest.TestCase):
             # from the project (QgsLayerTreeRegistryBridge), and later tests use it.
             root.findLayer(self.main.id()).setItemVisibilityChecked(True)
             self._clear_run_layers()
+
+    def test_ac36_mixed_sources(self):
+        """AC-36: water from a project layer, built-up from WorldCover (stubbed locally)."""
+        self._clear_run_layers()
+        try:
+            res = self._fetch_with_local_raster_spec(
+                {"water": (self.main, 1, 80), "built_up": "worldcover"})
+            rows = self._csv_rows(res["csv"])
+            sources = {(r["class"], r["source"]) for r in rows}
+            self.assertIn(("water", "classes, band 1, value 80"), sources)
+            self.assertIn(("built_up", "ESA WorldCover 2021 v200"), sources)
+            self.assertEqual(list(res["fc"]["features"][0]["properties"])[-4:], FIELDS)
+            self.assertEqual(self._lines(res), ["Water overlap: 3 of 5 plots",
+                                                "Built-up overlap: 2 of 5 plots"])
+            layer = self._group().findLayers()[0].layer()
+            self.assertEqual(layer.name(), "WorldCover 2021: water & built-up")
+        finally:
+            self._clear_run_layers()
+
+    def test_ac37_only_water_on_worldcover(self):
+        self._clear_run_layers()
+        try:
+            res = self._fetch_with_local_raster_spec({"water": "worldcover"})
+            self.assertEqual(self._lines(res), ["Water overlap: 3 of 5 plots",
+                                                "Built-up overlap: not checked"])
+            for f in res["fc"]["features"]:
+                self.assertEqual(list(f["properties"])[-2:], ["WaterOverlap_m2", "WaterOverlap_pct"])
+                self.assertNotIn("BuiltUpOverlap_pct", f["properties"])
+            self.assertIsNotNone(self._group())
+        finally:
+            self._clear_run_layers()
+
+    def test_ac38_worldcover_unreachable_project_class_still_runs(self):
+        from osgeo import gdal
+
+        self._clear_run_layers()
+        saved = gdal.GetConfigOption("GDAL_HTTP_PROXY")
+        gdal.SetConfigOption("GDAL_HTTP_PROXY", "127.0.0.1:9")  # closed local port
+        try:
+            gdal.VSICurlClearCache()
+            res = self._run({"water": "worldcover", "built_up": (self.main, 1, 50)})
+        finally:
+            gdal.SetConfigOption("GDAL_HTTP_PROXY", saved)
+            gdal.VSICurlClearCache()
+            self._clear_run_layers()
+        self.assertEqual(self._lines(res), ["Water overlap: not run (cannot reach WorldCover)",
+                                            "Built-up overlap: 2 of 5 plots"])
+        for f in res["fc"]["features"]:
+            self.assertEqual(list(f["properties"])[-2:], ["BuiltUpOverlap_m2", "BuiltUpOverlap_pct"])
+        self.assertEqual({r["class"] for r in self._csv_rows(res["csv"])} - {"no_coverage"}, {"built_up"})
+        self.assertIsNone(self._group())
+
+    def test_ac39_ticked_project_class_without_layer(self):
+        res = self._run({"water": (None, 1, 80), "built_up": (self.main, 1, 50)})
+        self.assertEqual(self._lines(res)[0], "Water overlap: not run (no layer selected)")
+
+    def test_ac16_project_only_makes_no_network_request(self):
+        calls = []
+        with mock.patch("tract_geolocation_formatter.landcover_source.resolve_worldcover",
+                        lambda *a, **k: calls.append(a)), \
+                mock.patch("tract_geolocation_formatter.landcover_source.gdal_http_scope",
+                           side_effect=AssertionError("no HTTP scope expected")):
+            res = self._run(self._both())
+        self.assertEqual(calls, [])
+        self.assertEqual(self._lines(res), ["Water overlap: 3 of 5 plots",
+                                            "Built-up overlap: 2 of 5 plots"])
 
     def test_ac21_many_tiles_cancel(self):
         """AC-21: more than 12 tiles → confirmation; No → "not run (cancelled)", no reads."""

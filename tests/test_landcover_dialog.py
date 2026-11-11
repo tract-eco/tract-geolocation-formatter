@@ -86,21 +86,38 @@ class LandcoverDialogTests(unittest.TestCase):
         sip.delete(self.d)
         self.plugin.dlg = None
 
-    def test_defaults_off_fetch_and_disabled(self):
-        self.assertFalse(self.d.landcoverCheckBox.isChecked())
-        self.assertTrue(self.d.landcoverFetchRadio.isChecked())
-        self.assertFalse(self.d.landcoverContainer.isEnabled())
-        self.assertFalse(self.d.landcoverClassesWidget.isEnabled())
-        self.assertIn("separate CSV", self.d.landcoverCheckBox.toolTip())
+    def _select(self, combo, data):
+        combo.setCurrentIndex(combo.findData(data))
 
-    def test_enable_logic(self):
-        self.d.landcoverCheckBox.setChecked(True)
-        self.assertTrue(self.d.landcoverContainer.isEnabled())
-        self.assertFalse(self.d.landcoverClassesWidget.isEnabled())
-        self.d.landcoverProjectRadio.setChecked(True)
-        self.assertTrue(self.d.landcoverClassesWidget.isEnabled())
-        self.d.landcoverCheckBox.setChecked(False)
-        self.assertFalse(self.d.landcoverClassesWidget.isEnabled())
+    def test_defaults_unticked_worldcover_and_disabled(self):
+        for box, source in ((self.d.landcoverWaterCheckBox, self.d.landcoverWaterSourceCombo),
+                            (self.d.landcoverBuiltUpCheckBox, self.d.landcoverBuiltUpSourceCombo)):
+            self.assertFalse(box.isChecked())
+            self.assertEqual(source.currentData(), "worldcover")
+            self.assertEqual([source.itemData(i) for i in range(source.count())], ["worldcover", "project"])
+            self.assertEqual([source.itemText(i) for i in range(source.count())],
+                             ["ESA WorldCover 2021", "User layer"])
+            self.assertFalse(source.isEnabled())
+        self.assertFalse(self.d.landcoverWaterLayerCombo.isEnabled())
+        self.assertIn("separate CSV", self.d.landcoverGroupBox.toolTip())
+        self.assertIn("ESA's servers", self.d.landcoverWaterSourceCombo.toolTip())
+        self.assertFalse(self.plugin._landcover_config_from_dialog().enabled)
+
+    def test_ac39_enable_logic_per_row(self):
+        """AC-39: Source follows the row checkbox; layer/band/value need Source = project."""
+        d = self.d
+        d.landcoverWaterCheckBox.setChecked(True)
+        self.assertTrue(d.landcoverWaterSourceCombo.isEnabled())
+        self.assertFalse(d.landcoverWaterLayerCombo.isEnabled())
+        self._select(d.landcoverWaterSourceCombo, "project")
+        for w in (d.landcoverWaterLayerCombo, d.landcoverWaterBandCombo, d.landcoverWaterValueCombo):
+            self.assertTrue(w.isEnabled())
+        # The other row is independent.
+        self.assertFalse(d.landcoverBuiltUpSourceCombo.isEnabled())
+        self.assertFalse(d.landcoverBuiltUpLayerCombo.isEnabled())
+        d.landcoverWaterCheckBox.setChecked(False)
+        self.assertFalse(d.landcoverWaterSourceCombo.isEnabled())
+        self.assertFalse(d.landcoverWaterLayerCombo.isEnabled())
 
     def test_layer_combo_lists_rasters_only_with_empty_entry(self):
         combo = self.d.landcoverWaterLayerCombo
@@ -138,46 +155,64 @@ class LandcoverDialogTests(unittest.TestCase):
         self.assertNotEqual(validator.validate("8.5", 0)[0], QValidator.State.Acceptable)
         self.assertEqual(validator.validate("abc", 0)[0], QValidator.State.Invalid)
 
-    def test_config_from_dialog(self):
-        from tract_geolocation_formatter.landcover import BUILT_UP, MODE_PROJECT, WATER
+    def test_config_from_dialog_mixed_sources(self):
+        from tract_geolocation_formatter.landcover import BUILT_UP, WATER
 
-        self.d.landcoverCheckBox.setChecked(True)
-        self.d.landcoverProjectRadio.setChecked(True)
-        self.d.landcoverWaterLayerCombo.setLayer(self.three_band)
-        self.d.landcoverWaterBandCombo.setCurrentIndex(1)
-        self.d.landcoverWaterValueCombo.setEditText("7")
+        d = self.d
+        d.landcoverWaterCheckBox.setChecked(True)
+        self._select(d.landcoverWaterSourceCombo, "project")
+        d.landcoverWaterLayerCombo.setLayer(self.three_band)
+        d.landcoverWaterBandCombo.setCurrentIndex(1)
+        d.landcoverWaterValueCombo.setEditText("7")
+        d.landcoverBuiltUpCheckBox.setChecked(True)  # WorldCover (default source)
         config = self.plugin._landcover_config_from_dialog()
         self.assertTrue(config.enabled)
-        self.assertEqual(config.mode, MODE_PROJECT)
-        spec = config.classes[WATER]
-        self.assertEqual((spec.layer_id, spec.band, spec.value), (self.three_band.id(), 2, "7"))
-        self.assertIsNone(config.classes[BUILT_UP])
+        water, built = config.classes[WATER], config.classes[BUILT_UP]
+        self.assertEqual((water.enabled, water.source, water.layer_id, water.band, water.value),
+                         (True, "project", self.three_band.id(), 2, "7"))
+        self.assertEqual((built.enabled, built.source), (True, "worldcover"))
+        self.assertEqual(config.classes_with_source("worldcover"), [BUILT_UP])
+        self.assertEqual(config.classes_with_source("project"), [WATER])
+
+    def test_only_one_class_ticked(self):
+        from tract_geolocation_formatter.landcover import BUILT_UP, WATER
+
+        self.d.landcoverWaterCheckBox.setChecked(True)
+        config = self.plugin._landcover_config_from_dialog()
+        self.assertTrue(config.enabled)
+        self.assertTrue(config.classes[WATER].enabled)
+        self.assertFalse(config.classes[BUILT_UP].enabled)
 
     def test_ac29_settings_round_trip(self):
-        """AC-29: options are restored when the dialog reopens."""
-        self.d.landcoverCheckBox.setChecked(True)
-        self.d.landcoverProjectRadio.setChecked(True)
-        self.d.landcoverWaterLayerCombo.setLayer(self.three_band)
-        self.d.landcoverWaterBandCombo.setCurrentIndex(2)
-        self.d.landcoverWaterValueCombo.setEditText("7")
-        self.d.landcoverBuiltUpLayerCombo.setLayer(self.paletted)
-        self.d.landcoverBuiltUpValueCombo.setEditText("50")
+        """AC-29 / AC-39: sources and layers are restored; checkboxes start unticked (DEC-23)."""
+        d = self.d
+        d.landcoverWaterCheckBox.setChecked(True)
+        self._select(d.landcoverWaterSourceCombo, "project")
+        d.landcoverWaterLayerCombo.setLayer(self.three_band)
+        d.landcoverWaterBandCombo.setCurrentIndex(2)
+        d.landcoverWaterValueCombo.setEditText("7")
+        d.landcoverBuiltUpCheckBox.setChecked(True)
+        self._select(d.landcoverBuiltUpSourceCombo, "worldcover")
         self.plugin._save_landcover_settings()
 
-        self.d.landcoverCheckBox.setChecked(False)
-        self.d.landcoverFetchRadio.setChecked(True)
-        self.d.landcoverWaterLayerCombo.setLayer(None)
-        self.d.landcoverBuiltUpLayerCombo.setLayer(None)
+        d.landcoverWaterCheckBox.setChecked(False)
+        self._select(d.landcoverWaterSourceCombo, "worldcover")
+        d.landcoverWaterLayerCombo.setLayer(None)
+        d.landcoverBuiltUpCheckBox.setChecked(False)
         self.plugin._load_landcover_settings()
 
-        self.assertTrue(self.d.landcoverCheckBox.isChecked())
-        self.assertTrue(self.d.landcoverProjectRadio.isChecked())
-        self.assertIs(self.d.landcoverWaterLayerCombo.currentLayer(), self.three_band)
-        self.assertEqual(self.d.landcoverWaterBandCombo.currentData(), 3)
-        self.assertEqual(self.d.landcoverWaterValueCombo.currentText(), "7")
-        self.assertIs(self.d.landcoverBuiltUpLayerCombo.currentLayer(), self.paletted)
-        self.assertEqual(self.d.landcoverBuiltUpValueCombo.currentText(), "50")
-        self.assertTrue(self.d.landcoverClassesWidget.isEnabled())
+        self.assertFalse(d.landcoverWaterCheckBox.isChecked())
+        self.assertFalse(d.landcoverBuiltUpCheckBox.isChecked())
+        self.assertFalse(self.plugin._landcover_config_from_dialog().enabled)
+        self.assertEqual(d.landcoverWaterSourceCombo.currentData(), "project")
+        self.assertIs(d.landcoverWaterLayerCombo.currentLayer(), self.three_band)
+        self.assertEqual(d.landcoverWaterBandCombo.currentData(), 3)
+        self.assertEqual(d.landcoverWaterValueCombo.currentText(), "7")
+        self.assertEqual(d.landcoverBuiltUpSourceCombo.currentData(), "worldcover")
+        # Ticking water again brings back the remembered user layer, ready to use.
+        d.landcoverWaterCheckBox.setChecked(True)
+        self.assertTrue(d.landcoverWaterLayerCombo.isEnabled())
+        self.assertFalse(d.landcoverBuiltUpLayerCombo.isEnabled())
 
     def test_ac29_removed_layer_shows_as_not_set(self):
         from qgis.core import QgsProject, QgsRasterLayer

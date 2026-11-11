@@ -562,109 +562,87 @@
     </widget>
    </item>
 
-   <!-- Land cover check group (SPEC-landcover-overlap) -->
+   <!-- Land cover check group (SPEC-landcover-overlap; per-class rows, DEC-21) -->
    <item>
     <widget class="QGroupBox" name="landcoverGroupBox">
      <property name="title">
       <string>Land cover check</string>
      </property>
+     <property name="toolTip">
+      <string>Reports how much of each plot lies on open water or built-up land. Tick a class to check it, and choose its source. Results go to overlap fields in the GeoJSON, a separate CSV and the map, not the validation report.</string>
+     </property>
      <layout class="QVBoxLayout" name="landcoverLayout">
       <item>
-       <widget class="QCheckBox" name="landcoverCheckBox">
-        <property name="text">
-         <string>Check overlap with water and built-up areas</string>
-        </property>
-        <property name="toolTip">
-         <string>Reports how much of each plot lies on open water or built-up land. Results go to overlap fields in the GeoJSON, a separate CSV and the map, not the validation report. Fetch mode reads ESA WorldCover data from ESA's servers (only which 3x3 degree areas hold plots is revealed).</string>
-        </property>
-        <property name="checked">
-         <bool>false</bool>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QWidget" name="landcoverContainer">
-        <layout class="QVBoxLayout" name="landcoverContainerLayout">
+       <widget class="QWidget" name="landcoverClassesWidget">
+        <layout class="QGridLayout" name="landcoverClassesLayout">
          <property name="leftMargin"><number>0</number></property>
          <property name="rightMargin"><number>0</number></property>
-         <item>
-          <widget class="QWidget" name="landcoverModeWidget">
-           <layout class="QHBoxLayout" name="landcoverModeLayout">
-            <property name="leftMargin"><number>0</number></property>
-            <property name="rightMargin"><number>0</number></property>
-            <item>
-             <widget class="QRadioButton" name="landcoverFetchRadio">
-              <property name="text">
-               <string>Fetch WorldCover (ESA, 2021)</string>
-              </property>
-              <property name="checked">
-               <bool>true</bool>
-              </property>
-             </widget>
-            </item>
-            <item>
-             <widget class="QRadioButton" name="landcoverProjectRadio">
-              <property name="text">
-               <string>Use layers from project</string>
-              </property>
-             </widget>
-            </item>
-           </layout>
+         <item row="0" column="1">
+          <widget class="QLabel" name="landcoverSourceHeader">
+           <property name="text"><string>Source</string></property>
           </widget>
          </item>
-         <item>
-          <widget class="QWidget" name="landcoverClassesWidget">
-           <layout class="QGridLayout" name="landcoverClassesLayout">
-            <property name="leftMargin"><number>0</number></property>
-            <property name="rightMargin"><number>0</number></property>
-            <item row="0" column="1">
-             <widget class="QLabel" name="landcoverLayerHeader">
-              <property name="text"><string>Raster layer</string></property>
-             </widget>
-            </item>
-            <item row="0" column="2">
-             <widget class="QLabel" name="landcoverBandHeader">
-              <property name="text"><string>Band</string></property>
-             </widget>
-            </item>
-            <item row="0" column="3">
-             <widget class="QLabel" name="landcoverValueHeader">
-              <property name="text"><string>Class value</string></property>
-             </widget>
-            </item>
-            <item row="1" column="0">
-             <widget class="QLabel" name="landcoverWaterLabel">
-              <property name="text"><string>Water</string></property>
-             </widget>
-            </item>
-            <item row="1" column="1">
-             <widget class="QgsMapLayerComboBox" name="landcoverWaterLayerCombo"/>
-            </item>
-            <item row="1" column="2">
-             <widget class="QComboBox" name="landcoverWaterBandCombo"/>
-            </item>
-            <item row="1" column="3">
-             <widget class="QComboBox" name="landcoverWaterValueCombo">
-              <property name="editable"><bool>true</bool></property>
-             </widget>
-            </item>
-            <item row="2" column="0">
-             <widget class="QLabel" name="landcoverBuiltUpLabel">
-              <property name="text"><string>Built-up</string></property>
-             </widget>
-            </item>
-            <item row="2" column="1">
-             <widget class="QgsMapLayerComboBox" name="landcoverBuiltUpLayerCombo"/>
-            </item>
-            <item row="2" column="2">
-             <widget class="QComboBox" name="landcoverBuiltUpBandCombo"/>
-            </item>
-            <item row="2" column="3">
-             <widget class="QComboBox" name="landcoverBuiltUpValueCombo">
-              <property name="editable"><bool>true</bool></property>
-             </widget>
-            </item>
-           </layout>
+         <item row="0" column="2">
+          <widget class="QLabel" name="landcoverLayerHeader">
+           <property name="text"><string>Raster layer</string></property>
+          </widget>
+         </item>
+         <item row="0" column="3">
+          <widget class="QLabel" name="landcoverBandHeader">
+           <property name="text"><string>Band</string></property>
+          </widget>
+         </item>
+         <item row="0" column="4">
+          <widget class="QLabel" name="landcoverValueHeader">
+           <property name="text"><string>Class value</string></property>
+          </widget>
+         </item>
+         <item row="1" column="0">
+          <widget class="QCheckBox" name="landcoverWaterCheckBox">
+           <property name="text"><string>Water</string></property>
+           <property name="checked"><bool>false</bool></property>
+          </widget>
+         </item>
+         <item row="1" column="1">
+          <widget class="QComboBox" name="landcoverWaterSourceCombo">
+           <property name="toolTip">
+            <string>ESA WorldCover 2021 is read from ESA's servers (only which 3x3 degree areas hold plots is revealed). A user layer stays offline.</string>
+           </property>
+          </widget>
+         </item>
+         <item row="1" column="2">
+          <widget class="QgsMapLayerComboBox" name="landcoverWaterLayerCombo"/>
+         </item>
+         <item row="1" column="3">
+          <widget class="QComboBox" name="landcoverWaterBandCombo"/>
+         </item>
+         <item row="1" column="4">
+          <widget class="QComboBox" name="landcoverWaterValueCombo">
+           <property name="editable"><bool>true</bool></property>
+          </widget>
+         </item>
+         <item row="2" column="0">
+          <widget class="QCheckBox" name="landcoverBuiltUpCheckBox">
+           <property name="text"><string>Built-up</string></property>
+           <property name="checked"><bool>false</bool></property>
+          </widget>
+         </item>
+         <item row="2" column="1">
+          <widget class="QComboBox" name="landcoverBuiltUpSourceCombo">
+           <property name="toolTip">
+            <string>ESA WorldCover 2021 is read from ESA's servers (only which 3x3 degree areas hold plots is revealed). A user layer stays offline.</string>
+           </property>
+          </widget>
+         </item>
+         <item row="2" column="2">
+          <widget class="QgsMapLayerComboBox" name="landcoverBuiltUpLayerCombo"/>
+         </item>
+         <item row="2" column="3">
+          <widget class="QComboBox" name="landcoverBuiltUpBandCombo"/>
+         </item>
+         <item row="2" column="4">
+          <widget class="QComboBox" name="landcoverBuiltUpValueCombo">
+           <property name="editable"><bool>true</bool></property>
           </widget>
          </item>
         </layout>

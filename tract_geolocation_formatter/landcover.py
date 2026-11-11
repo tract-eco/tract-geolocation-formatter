@@ -33,7 +33,7 @@ TILE_SIZE_DEG = 3
 
 WATER = "water"
 BUILT_UP = "built_up"
-NOT_ASSESSED = "not_assessed"
+NO_COVERAGE = "no_coverage"  # the raster has no pixels under the plot (DEC-22)
 CLASSES = (WATER, BUILT_UP)
 
 WATER_VALUE = 80      # WorldCover "Permanent water bodies"
@@ -51,8 +51,9 @@ GROUP_NAME = "TRACT land cover check"
 LAYER_NAME = "WorldCover 2021: water & built-up"
 MAX_TILES_WITHOUT_CONFIRM = 12
 
-MODE_FETCH = "fetch"
-MODE_PROJECT = "project"
+# Per-class reference source (DEC-21).
+SOURCE_WORLDCOVER = "worldcover"
+SOURCE_PROJECT = "project"
 
 # FR-10: (area field, percent field) per class.
 FIELD_NAMES = {
@@ -139,21 +140,40 @@ def tiles_for_bboxes(bboxes):
 
 @dataclass
 class ClassSpec:
-    """Project-mode reference for one class: a raster layer, a band and a class value."""
+    """Dialog state of one class row (DEC-21): ticked or not, and where its data comes from.
 
-    layer_id: str
-    band: int
-    value: object  # int when valid; kept raw so validation can report a bad entry
+    ``source`` is SOURCE_WORLDCOVER or SOURCE_PROJECT. ``layer_id``/``band``/``value``
+    matter only for SOURCE_PROJECT; ``value`` is kept raw so validation can report a bad
+    entry.
+    """
+
+    enabled: bool = False
+    source: str = SOURCE_WORLDCOVER
+    layer_id: str = ""
+    band: int = 1
+    value: object = ""
 
 
 @dataclass
 class LandcoverConfig:
     """Dialog state for one run, read once at the start (plan § _run_landcover_check)."""
 
-    enabled: bool = False
-    mode: str = MODE_FETCH
-    # Project mode only: class key -> ClassSpec, or None for "do not check this class".
+    # class key -> ClassSpec (both classes present when read from the dialog).
     classes: dict = field(default_factory=dict)
+
+    @property
+    def enabled(self):
+        """The check runs when at least one class is ticked (DEC-21)."""
+        return any(spec is not None and spec.enabled for spec in self.classes.values())
+
+    def classes_with_source(self, source):
+        """Ticked classes using ``source``, in CLASSES order."""
+        return [
+            cls for cls in CLASSES
+            if self.classes.get(cls) is not None
+            and self.classes[cls].enabled
+            and self.classes[cls].source == source
+        ]
 
 
 @dataclass
@@ -163,7 +183,7 @@ class LandcoverResult:
     - ``classes``: class keys that were computed, in CLASSES order.
     - ``plot_order``: plot indices in output order.
     - ``values[cls][idx]``: ``(overlap_pct, overlap_area_m2)``, unrounded, or ``None``
-      when the plot has no reference pixels for that class (``not_assessed``).
+      when the plot has no reference pixels for that class (``no_coverage``).
     - ``class_pixels[cls][idx]``: pixel count of the class (0 for not assessed).
     - ``plot_areas[idx]``: plot area in m² (AREA_CRS).
     """
@@ -182,7 +202,7 @@ class LandcoverResult:
         """Number of plots reported for a class (the X / Y in the report lines)."""
         return sum(1 for idx in self.plot_order if self.reported(cls, idx))
 
-    def not_assessed(self, cls):
+    def no_coverage(self, cls):
         """Plot indices with no reference coverage for a class, in output order."""
         return [idx for idx in self.plot_order if self.values[cls].get(idx) is None]
 
@@ -194,7 +214,7 @@ class LandcoverOutcome:
     statuses: dict = field(default_factory=dict)   # cls -> STATUS_*
     reasons: dict = field(default_factory=dict)    # cls -> short reason (not run)
     sources: dict = field(default_factory=dict)    # cls -> CSV `source` text
-    coverage_sources: dict = field(default_factory=dict)  # cls -> `source` of not_assessed rows
+    coverage_sources: dict = field(default_factory=dict)  # cls -> `source` of no_coverage rows
     result: object = None                          # LandcoverResult or None
     n_plots: int = 0
     raster_path: str = None                        # Fetch mode: /vsicurl/ path or VRT
@@ -221,10 +241,10 @@ def project_source_label(layer_name, band, value):
 
 
 def project_coverage_label(layer_name, band):
-    """`source` of a Project-mode ``not_assessed`` row: the raster and band, no value.
+    """`source` of a Project-mode ``no_coverage`` row: the raster and band, no value.
 
     Coverage depends on the raster, not on the class value, so two classes reading the
-    same layer and band give one ``not_assessed`` row (DEC-14).
+    same layer and band give one ``no_coverage`` row (DEC-14).
     """
     return "{}, band {}".format(layer_name, band)
 
@@ -310,11 +330,11 @@ def _fmt(value, decimals):
 def csv_rows(result, feature_ids, node_ids, plot_ids, sources, coverage_sources=None):
     """FR-6 rows in long format, deterministic order.
 
-    One row per plot per reported class, then one ``not_assessed`` row per plot and
+    One row per plot per reported class, then one ``no_coverage`` row per plot and
     distinct coverage source with no coverage. Order: output order, then water,
-    built_up, not_assessed. ``feature_ids``/``node_ids``/``plot_ids`` map plot index →
+    built_up, no_coverage. ``feature_ids``/``node_ids``/``plot_ids`` map plot index →
     value; ``sources`` maps class → `source` text; ``coverage_sources`` maps class →
-    the `source` text of its ``not_assessed`` rows (default: ``sources``). Numbers are
+    the `source` text of its ``no_coverage`` rows (default: ``sources``). Numbers are
     formatted strings so the file is byte-stable.
     """
     coverage_sources = coverage_sources or {}
@@ -348,7 +368,7 @@ def csv_rows(result, feature_ids, node_ids, plot_ids, sources, coverage_sources=
             seen_sources.append(source)
             row = dict(base)
             row.update({
-                "class": NOT_ASSESSED,
+                "class": NO_COVERAGE,
                 "overlap_area_m2": "",
                 "overlap_pct": "",
                 "source": source,

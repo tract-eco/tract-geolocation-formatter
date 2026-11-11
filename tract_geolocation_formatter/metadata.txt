@@ -36,17 +36,17 @@ changelog=
     - New <name>_overlaps.geojson with one feature per overlap area (plots, NodeIDs,
       PlotIDs, area, percentage and action taken), loaded into QGIS. New OVERLAPS section
       in the report and overlap_* rows in the CSV report.
-    - Optional land cover check (off by default; tick "Check overlap with water and
-      built-up areas"). Reports how much of each plot lies on permanent water or
-      built-up land, a sign of a misplaced boundary. Source: ESA WorldCover 2021,
-      streamed from ESA's public bucket (Fetch mode), or classified rasters already
-      in the project (Project mode, with layer, band and class value per class).
+    - Optional land cover check (off by default; tick Water, Built-up or both in the
+      Land cover check box). Reports how much of each plot lies on permanent water
+      or built-up land, a sign of a misplaced boundary. Each class has its own
+      source: ESA WorldCover 2021, streamed from ESA's public bucket, or a user
+      layer (a classified raster in the project, with layer, band and class value).
     - With the check on, the GeoJSON gets WaterOverlap_m2, WaterOverlap_pct,
       BuiltUpOverlap_m2 and BuiltUpOverlap_pct per plot (0 = no overlap, empty =
       not assessed), so flagged plots can be filtered, edited or deleted. A
       <name>_landcover_overlaps.csv lists every overlap, the report gets two
-      summary lines, and in Fetch mode a styled WorldCover layer is added below
-      the output. TRACTStatus is not affected. The options are remembered.
+      summary lines, and when a class uses WorldCover a styled WorldCover layer is
+      added below the output. TRACTStatus is not affected. The options are remembered.
     - Fixed: for GeoPackage layers (and any layer whose feature IDs don't start at
       0), report labels pointed at the wrong feature: "Feature N (PlotID = ...)"
       showed the number and PlotID of the next feature. Labels now use the feature's

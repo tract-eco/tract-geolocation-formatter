@@ -88,21 +88,21 @@ Details worth knowing:
 
 ## Land Cover Check (optional)
 
-A plot drawn over a lake, a river or a village is usually a misplaced or badly digitised boundary. Tick **Check overlap with water and built-up areas** to measure, for every plot, how much of it lies on **permanent water** or **built-up land**. It is a warning only: `TRACTStatus` and the validation report are not affected, and no plot is changed or removed.
+A plot drawn over a lake, a river or a village is usually a misplaced or badly digitised boundary. In the **Land cover check** box, tick **Water**, **Built-up** or both to measure, for every plot, how much of it lies on **permanent water** or **built-up land**. It is a warning only: `TRACTStatus` and the validation report are not affected, and no plot is changed or removed. With nothing ticked, the check doesn't run.
 
-**Two sources:**
+**Each class has its own source** — mix them freely (e.g. your own water layer with WorldCover built-up, or only water):
 
-| Mode | Reference data | Network |
-|------|----------------|---------|
-| **Fetch WorldCover (ESA, 2021)** (default) | [ESA WorldCover 10 m 2021 v200](https://esa-worldcover.org): class 80 = permanent water bodies, 50 = built-up. Only the tiles (3×3°) that contain plots are read, block by block — nothing is downloaded up front. More than 12 tiles asks for confirmation first. | Reads from ESA's public AWS bucket |
-| **Use layers from project** | Your own classified rasters: for Water and for Built-up, pick a raster layer, a band and the class value (pre-filled from the layer's paletted style when it has one). The same layer can serve both classes with different values; leave a class empty to skip it. Web map / XYZ layers are rejected (their pixels are colours, not classes). | None |
+| Source | Reference data | Network |
+|--------|----------------|---------|
+| **ESA WorldCover 2021** (default) | [ESA WorldCover 10 m 2021 v200](https://esa-worldcover.org): class 80 = permanent water bodies, 50 = built-up. Only the tiles (3×3°) that contain plots are read, block by block — nothing is downloaded up front. More than 12 tiles asks for confirmation first. | Reads from ESA's public AWS bucket |
+| **User layer** | Your own classified raster, already loaded in QGIS: pick the raster layer, the band and the class value (pre-filled from the layer's paletted style when it has one). The same layer can serve both classes with different values. Web map / XYZ layers are rejected (their pixels are colours, not classes). | None |
 
 **Results:**
 
 - **GeoJSON fields** on every plot: `WaterOverlap_m2`, `WaterOverlap_pct`, `BuiltUpOverlap_m2`, `BuiltUpOverlap_pct`. `0` = no overlap; empty (null) = the plot is outside the reference data. In QGIS, open the output layer's attribute table and filter, e.g. `"WaterOverlap_pct" > 0`, to find, edit or delete flagged plots. The split files carry the same fields.
-- **`<name>_landcover_overlaps.csv`** — one row per plot and class with overlap (`feature_id, NodeID, PlotID, class, overlap_area_m2, overlap_pct, plot_area_m2, source`), plus `not_assessed` rows for plots outside the reference data.
-- **Two summary lines** in the report, e.g. `Water overlap: 3 of 120 plots`, or `not run (<reason>)` if the check could not run (for example without internet) — the export itself always completes.
-- **Map layer (Fetch mode)** — *WorldCover 2021: water & built-up* (water blue, built-up red, everything else transparent) in a group *TRACT land cover check* below your output. Re-running replaces it. The layer reads from a temporary file, so in a saved project it may stop working after a restart: run the check again to bring it back.
+- **`<name>_landcover_overlaps.csv`** — one row per plot and class with overlap (`feature_id, NodeID, PlotID, class, overlap_area_m2, overlap_pct, plot_area_m2, source`), plus `no_coverage` rows for plots the reference data does not reach.
+- **Two summary lines** in the report, e.g. `Water overlap: 3 of 120 plots`, `Built-up overlap: not checked` for an unticked class, or `not run (<reason>)` if a class could not run (for example WorldCover without internet — a class using a user layer still runs). The export itself always completes.
+- **Map layer (when a class uses WorldCover)** — *WorldCover 2021: water & built-up* (water blue, built-up red, everything else transparent) in a group *TRACT land cover check* below your output. Re-running replaces it. The layer reads from a temporary file, so in a saved project it may stop working after a restart: run the check again to bring it back.
 
 **How it is measured:** pixels whose centre falls in the plot are counted (a very small plot is assessed from the one pixel it lies in); the overlap % is class pixels ÷ all pixels, and the area is that % of the plot's area. There is no threshold — a single 10 m pixel is reported, so filter by `overlap_pct` to ignore edge touches.
 
@@ -111,10 +111,10 @@ A plot drawn over a lake, a river or a village is usually a misplaced or badly d
 - WorldCover is a **2021 snapshot**: anything built since is not flagged.
 - 10 m pixels are coarse for small plots; percentages for plots of a few hundred m² are approximate.
 - Only **permanent** water counts: seasonal water, paddies and wetlands are not flagged.
-- In Project mode, plots extending beyond your raster are assessed on the covered part only.
+- With a user layer, plots extending beyond your raster are assessed on the covered part only.
 - Antimeridian-crossing plots are not supported.
 
-**Data, licence and privacy:** ESA WorldCover is licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Attribution (set on the map layer): *© ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium.* In Fetch mode no plot data leaves your computer; the tile requests only reveal which 3×3° areas contain plots. QGIS proxy settings are used. Project mode works fully offline.
+**Data, licence and privacy:** ESA WorldCover is licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Attribution (set on the map layer): *© ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium.* No plot data leaves your computer; when a class uses WorldCover, the tile requests only reveal which 3×3° areas contain plots. QGIS proxy settings are used. User layers work fully offline, and if no ticked class uses WorldCover no request is made at all.
 
 
 ## Output Files
