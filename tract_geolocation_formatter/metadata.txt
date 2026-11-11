@@ -27,7 +27,9 @@ changelog=
     - Overlaps between plots are listed in a review dialog after export. You choose
       what to change: clip plots of the same NodeID (the largest stays as it is),
       delete contained or identical plots, or remove the overlap from one plot of a
-      pair with different NodeIDs. Nothing changes unless you press Apply. Plots
+      pair with different NodeIDs. Contained plots and overlaps between NodeIDs
+      each have a Set all to control, and every row can still be changed on its
+      own. Nothing changes unless you press Apply. Plots
       with Z values are never clipped. For each clipped plot, the report and CSV
       show how much area it lost (percentage and m² before and after).
     - Every fixed plot is checked again, so a clip that leaves a plot too small is
