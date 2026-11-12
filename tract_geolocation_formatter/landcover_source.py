@@ -141,7 +141,8 @@ def ca_bundle_candidates():
             os.path.join(prefix, "..", "Resources", "certs", "certs.pem"),
             os.path.join(pkg, "..", "certs", "certs.pem"),
         ]
-    except Exception:
+    except (AttributeError, RuntimeError, TypeError):
+        # No QGIS paths (e.g. QgsApplication not initialised): system bundles only.
         pass
     # System bundles (macOS, Linux). No third-party package (e.g. certifi) is used:
     # the plugin imports only qgis, qgis.PyQt, osgeo and the standard library.
@@ -219,7 +220,10 @@ def temp_dir():
 
 def vrt_path(tiles, directory=None):
     """VRT file for a tile set; the same tiles always map to the same name."""
-    digest = hashlib.sha1(",".join(sorted(tiles)).encode("utf-8")).hexdigest()[:16]
+    # A file name, not security: usedforsecurity=False (Python 3.9+).
+    digest = hashlib.sha1(
+        ",".join(sorted(tiles)).encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:16]
     return os.path.join(directory or temp_dir(), "worldcover_{}.vrt".format(digest))
 
 

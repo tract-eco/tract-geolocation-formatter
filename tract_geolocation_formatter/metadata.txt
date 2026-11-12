@@ -33,9 +33,6 @@ changelog=
       changed on its own. Nothing changes unless you press Apply. Plots with Z
       values are clipped too. For each clipped plot, the report and CSV show how
       much area it lost (percentage and m² before and after).
-    - Every fixed plot is checked again, so a clip that leaves a plot too small is
-      flagged NEEDS_FIX. Deleted plots are left out of the output, the split files
-      and Master Data, and stay in the CSV report.
     - New <name>_overlaps.geojson with one feature per overlap area (plots, NodeIDs,
       PlotIDs, area, percentage and action taken), loaded into QGIS. New OVERLAPS section
       in the report (counts by type) and overlap_* rows in the CSV report.
@@ -52,10 +49,7 @@ changelog=
       summary lines, and when a class uses WorldCover a styled WorldCover layer is
       added below the output. TRACTStatus is not affected. The source and layer
       choices are remembered; Water and Built-up start unticked on every run.
-    - Fixed: for GeoPackage layers (and any layer whose feature IDs don't start at
-      0), report labels pointed at the wrong feature: "Feature N (PlotID = ...)"
-      showed the number and PlotID of the next feature. Labels now use the feature's
-      position in the input layer. Output files were not affected.
+ 
     0.5.1
     - Fixed a crash on load for QGIS 3.36 and earlier: "TypeError: QgsField():
       arguments did not match any overloaded call". The version-safe string field

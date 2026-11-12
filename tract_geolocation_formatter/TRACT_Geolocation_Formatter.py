@@ -641,7 +641,8 @@ def _renderer_class_values(layer, band):
             if fn is not None:
                 try:
                     return fn()
-                except Exception:
+                except (TypeError, RuntimeError):
+                    # This renderer's method needs arguments or failed: try the next name.
                     continue
         return None
 
