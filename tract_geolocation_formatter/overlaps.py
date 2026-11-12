@@ -123,6 +123,47 @@ def _polygonal(geom):
     return MultiPolygon()
 
 
+def _first_z(geom):
+    """Z of the first vertex of a polygonal geometry (0.0 if it has none)."""
+    polys = [geom] if isinstance(geom, Polygon) else list(geom.geoms)
+    for p in polys:
+        for c in p.exterior.coords:
+            if len(c) > 2 and not math.isnan(c[2]):
+                return c[2]
+    return 0.0
+
+
+def _match_z(geom, like):
+    """Give ``geom`` the dimension of ``like``.
+
+    A clip creates new vertices where it cuts the boundary, and their Z may be
+    missing or NaN. Z here is not used downstream, so with a Z ``like`` every
+    vertex keeps its own Z and any missing one takes the first Z of ``like``;
+    with a 2D ``like`` the Z is dropped.
+    """
+    if geom.is_empty:
+        return geom
+    keep_z = like.has_z
+    z = _first_z(like) if keep_z else None
+
+    def ring(coords):
+        out = []
+        for c in coords:
+            if not keep_z:
+                out.append((c[0], c[1]))
+                continue
+            cz = c[2] if len(c) > 2 and not math.isnan(c[2]) else z
+            out.append((c[0], c[1], cz))
+        return out
+
+    def poly(p):
+        return Polygon(ring(p.exterior.coords), [ring(r.coords) for r in p.interiors])
+
+    if isinstance(geom, Polygon):
+        return poly(geom)
+    return MultiPolygon([poly(p) for p in geom.geoms])
+
+
 def _pct(area, smaller):
     if smaller <= 0:
         return 100.0
@@ -331,16 +372,19 @@ def apply_feature_fixes(
     1. Deletions from ``containment_actions`` (``{(a, b): "delete_contained" |
        "delete_container" | "keep"}``). For identical pairs the contained plot
        is the later one in output order.
-    2. Same-NodeID clipping (if ``clip_same_node``): per NodeID, plots sorted by
-       ``(-area, plot_id, index)`` (DEC-5); each plot is clipped by every
-       earlier plot in that order it has a partial finding with.
+    2. Same-NodeID clipping. ``clip_same_node`` is either a bool (True: per
+       NodeID, plots sorted by ``(-area, plot_id, index)`` (DEC-5); each plot is
+       clipped by every earlier plot in that order it has a partial finding
+       with) or a dict ``{(a, b): "keep" | "remove_from_a" | "remove_from_b"}``
+       of per-pair choices, applied in that same size order.
     3. Cross-NodeID clipping from ``cross_node_actions`` (``{(a, b): "keep" |
        "remove_from_a" | "remove_from_b"}``) in finding order, against the
        current geometries. Pairs with a deleted plot are skipped.
 
-    Below-threshold findings are never applied. Clips of a plot in
-    ``skip_clip`` (plots with Z values) are skipped and recorded as
-    ``skipped_z``. ``plot_areas`` (``index -> area``) orders step 2; planar area
+    Below-threshold findings are never applied. Plots with Z values are
+    clipped too; new vertices take an existing Z of the plot (``_match_z``).
+    Clips of a plot in ``skip_clip`` are skipped and recorded as ``skipped_z``
+    (the plugin passes none). ``plot_areas`` (``index -> area``) orders step 2; planar area
     is used without it.
 
     Returns ``(new_geoms, deleted, actions)``: ``{index: geom}`` for changed,
@@ -374,14 +418,18 @@ def apply_feature_fixes(
         if target in skip_clip:
             actions[(f.index_a, f.index_b)] = ACTION_SKIPPED_Z
             return
-        current[target] = _polygonal(current[target].difference(current[other]))
+        clipped = _polygonal(current[target].difference(current[other]))
+        current[target] = _match_z(clipped, current[target])
         actions[(f.index_a, f.index_b)] = _side(f, target, ACTION_CLIPPED_A, ACTION_CLIPPED_B)
 
     # 2. Same-NodeID clipping.
     same_partial = [
         f for f in fixable if f.category == CATEGORY_SAME_NODE and f.kind == KIND_PARTIAL
     ]
-    if not clip_same_node:
+    # A dict gives one choice per pair (as for cross-NodeID pairs); a bool
+    # clips every pair's smaller plot (True) or keeps both (False).
+    same_node_choices = clip_same_node if isinstance(clip_same_node, dict) else None
+    if not clip_same_node and same_node_choices is None:
         for f in same_partial:
             actions[(f.index_a, f.index_b)] = ACTION_KEPT
     else:
@@ -415,6 +463,15 @@ def apply_feature_fixes(
         )
         for f in ordered:
             if f.index_a in deleted or f.index_b in deleted:
+                continue
+            if same_node_choices is not None:
+                choice = same_node_choices.get((f.index_a, f.index_b), "keep")
+                if choice == "remove_from_a":
+                    clip(f, f.index_a, f.index_b)
+                elif choice == "remove_from_b":
+                    clip(f, f.index_b, f.index_a)
+                else:
+                    actions[(f.index_a, f.index_b)] = ACTION_KEPT
                 continue
             if rank[f.index_a] < rank[f.index_b]:
                 keeper, target = f.index_a, f.index_b

@@ -2493,7 +2493,6 @@ class TractGeolocationFormatter:
             "clipped": 0,
             "deleted": 0,
             "unresolved": 0,
-            "skipped_z": 0,
             "deleted_fids": [],
             "changed_fids": [],
             "changed": False,
@@ -2518,16 +2517,15 @@ class TractGeolocationFormatter:
         if not dialog.exec():
             self._log(self.tr("Overlap fixes skipped; the output is unchanged."))
             return result
-        clip_same_node, containment_actions, cross_node_actions = dialog.results()
+        same_node_actions, containment_actions, cross_node_actions = dialog.results()
 
-        skip_clip = frozenset(k for k, it in by_index.items() if it["has_z"])
+        # Plots with Z values are clipped too: new vertices take an existing Z.
         new_geoms, deleted, actions = apply_feature_fixes(
             items,
             findings,
-            clip_same_node,
+            same_node_actions,
             containment_actions,
             cross_node_actions,
-            skip_clip=skip_clip,
             plot_areas=area_m2,
         )
 
@@ -2538,20 +2536,6 @@ class TractGeolocationFormatter:
                 partners.setdefault(a, []).append(b)
             elif action == "clipped_b":
                 partners.setdefault(b, []).append(a)
-            elif action == "skipped_z":
-                # The plot that would have been clipped: the user's choice for
-                # a cross-NodeID pair, otherwise the pair's Z plot(s).
-                choice = cross_node_actions.get((a, b))
-                if choice == "remove_from_a":
-                    targets = [a]
-                elif choice == "remove_from_b":
-                    targets = [b]
-                else:
-                    targets = [k for k in (a, b) if k in skip_clip]
-                for k in targets:
-                    result["skipped_z"] += 1
-                    row(k, "overlap_unresolved",
-                        "Overlap fix could not be applied (clip skipped: plot has Z values)")
 
         # 6. Guard each changed geometry.
         changed = set()
@@ -3808,8 +3792,6 @@ class TractGeolocationFormatter:
                 (self.tr("Plots deleted"), deleted_count),
                 (self.tr("Fixes not applied"),
                  part_stats["unresolved"] + (overlap_result["unresolved"] if overlap_result else 0)),
-                (self.tr("Clips skipped (Z values)"),
-                 overlap_result["skipped_z"] if overlap_result else 0),
                 (self.tr("Plots not checked for overlaps (invalid geometry)"),
                  overlap_result["not_checked"] if overlap_result else 0),
             ]

@@ -1,5 +1,6 @@
 """
-Overlap review dialog (GH-12 FR-5): bulk actions for contained and cross-NodeID rows.
+Overlap review dialog (GH-12 FR-5): the three tables (contained, same NodeID,
+different NodeIDs) and their "Set all to" controls.
 
 Builds the dialog offscreen with hand-made findings (QGIS Python only; skipped
 elsewhere). Nothing is exec'd: the tests set the controls and read ``results()``.
@@ -45,8 +46,11 @@ class OverlapReviewBulkTests(unittest.TestCase):
             Finding(4, 5, "B", "containment", 4, 5, g, 10.0, 100.0, False),
             Finding(6, 7, "C", "partial", None, None, g, 20.0, 2.0, False),
             Finding(8, 9, "C", "partial", None, None, g, 90.0, 9.0, False),
+            # Same-NodeID partial: plot 10 (area 1010) vs 11 (1011), 12 (1012) vs 13 (1013).
+            Finding(10, 11, "B", "partial", None, None, g, 5.0, 1.0, False),
+            Finding(12, 13, "B", "partial", None, None, g, 50.0, 5.0, False),
         ]
-        nodes = "ABCCDDEFGH"
+        nodes = "ABCCDDEFGHIIJJ"
         self.plots = {
             i: {"label": "Plot %d" % i, "node_id": n, "area": 1000.0 + i}
             for i, n in enumerate(nodes)
@@ -136,13 +140,54 @@ class OverlapReviewBulkTests(unittest.TestCase):
         )
         self.assertEqual(self.dialog.bulkCombo.currentIndex(), 0)
 
+    def test_same_node_table_defaults_to_remove_from_smaller(self):
+        d = self.dialog
+        self.assertFalse(d.sameTable.isHidden())
+        self.assertFalse(d.sameBulkCombo.isHidden())
+        # Sorted by % of smaller, largest first; the smaller plot is A in both pairs.
+        self.assertEqual(d.sameTable.item(0, 0).text(), "Plot 12")
+        self.assertEqual(
+            d.results()[0], {(10, 11): "remove_from_a", (12, 13): "remove_from_a"}
+        )
+        # Cross-NodeID rows still default to Keep both.
+        self.assertEqual(d.results()[2], {(6, 7): "keep", (8, 9): "keep"})
+
+    def test_same_node_bulk_sets_every_row(self):
+        from tract_geolocation_formatter.overlap_review_dialog import (
+            _BULK_KEEP,
+            _BULK_LARGER,
+            KEEP,
+        )
+
+        d = self.dialog
+        self._set(d.sameBulkCombo, _BULK_LARGER)
+        self.assertEqual(
+            d.results()[0], {(10, 11): "remove_from_b", (12, 13): "remove_from_b"}
+        )
+        self.assertEqual(d.sameBulkCombo.currentIndex(), 0)
+        self._set(d.sameBulkCombo, _BULK_KEEP)
+        self.assertEqual(set(d.results()[0].values()), {KEEP})
+        # The other tables are untouched.
+        self.assertEqual(d.results()[2], {(6, 7): "keep", (8, 9): "keep"})
+
+    def test_same_node_rows_stay_editable(self):
+        from tract_geolocation_formatter.overlap_review_dialog import KEEP
+
+        self._set(self.dialog._same_combos[0], KEEP)  # row 0 is pair (12, 13)
+        self.assertEqual(
+            self.dialog.results()[0], {(10, 11): "remove_from_a", (12, 13): "keep"}
+        )
+
     def test_hidden_without_containment(self):
         from tract_geolocation_formatter.overlap_review_dialog import OverlapReviewDialog
         from qgis.PyQt import sip
 
-        d = OverlapReviewDialog(self.findings[3:], self.plots, {})
+        d = OverlapReviewDialog(self.findings[3:5], self.plots, {})
         try:
             self.assertTrue(d.containmentBulkCombo.isHidden())
+            self.assertTrue(d.sameTable.isHidden())
+            self.assertTrue(d.sameBulkCombo.isHidden())
+            self.assertEqual(d.results()[0], {})
             self.assertEqual(d.results()[1], {})
         finally:
             sip.delete(d)

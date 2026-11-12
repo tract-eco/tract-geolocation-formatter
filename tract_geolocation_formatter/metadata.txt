@@ -24,14 +24,15 @@ changelog=
     - With the check on, parts of one plot that overlap are dissolved into one
       shape, keeping the full plot area. The usual repair could lose the
       overlapping area.
-    - Overlaps between plots are listed in a review dialog after export. You choose
-      what to change: clip plots of the same NodeID (the largest stays as it is),
-      delete contained or identical plots, or remove the overlap from one plot of a
-      pair with different NodeIDs. Contained plots and overlaps between NodeIDs
-      each have a Set all to control, and every row can still be changed on its
-      own. Nothing changes unless you press Apply. Plots with Z values are never
-      clipped. For each clipped plot, the report and CSV
-      show how much area it lost (percentage and m² before and after).
+    - Overlaps between plots are listed in a review dialog after export, in three
+      tables: contained or identical plots (delete one or keep both), partial
+      overlaps within the same NodeID and partial overlaps between different
+      NodeIDs (keep both or remove the overlap from one plot). Same-NodeID overlaps
+      default to removing the overlap from the smaller plot; the others default to
+      keeping both. Each table has a Set all to control, and every row can still be
+      changed on its own. Nothing changes unless you press Apply. Plots with Z
+      values are clipped too. For each clipped plot, the report and CSV show how
+      much area it lost (percentage and m² before and after).
     - Every fixed plot is checked again, so a clip that leaves a plot too small is
       flagged NEEDS_FIX. Deleted plots are left out of the output, the split files
       and Master Data, and stay in the CSV report.

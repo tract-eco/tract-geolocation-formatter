@@ -30,7 +30,6 @@ from qgis.PyQt.QtCore import QCoreApplication, Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -94,32 +93,22 @@ class OverlapReviewDialog(QDialog):
         self._node_ids = {idx: info.get("node_id") for idx, info in plots.items()}
 
         fixable = [f for f in findings if is_fixable(f)]
-        self._same_partial = [
-            f for f in fixable if f.category == CATEGORY_SAME_NODE and f.kind == KIND_PARTIAL
-        ]
+        self._same_partial = sorted(
+            (f for f in fixable if f.category == CATEGORY_SAME_NODE and f.kind == KIND_PARTIAL),
+            key=lambda f: (-f.pct_of_smaller, f.index_a, f.index_b),
+        )
         self._containment = [f for f in fixable if f.kind != KIND_PARTIAL]
         self._cross_partial = sorted(
             (f for f in fixable if f.category == CATEGORY_CROSS_NODE and f.kind == KIND_PARTIAL),
             key=lambda f: (-f.pct_of_smaller, f.index_a, f.index_b),
         )
         self._containment_combos = []
+        self._same_combos = []
         self._cross_combos = []
 
         layout = QVBoxLayout(self)
 
-        # 1. Same-NodeID clipping.
-        n_pairs = len(self._same_partial)
-        self.clipCheckBox = QCheckBox(
-            _tr(
-                "Clip overlaps between plots of the same NodeID "
-                "(largest plot keeps the overlap) — {0} {1}"
-            ).format(n_pairs, _tr("pair") if n_pairs == 1 else _tr("pairs"))
-        )
-        self.clipCheckBox.setChecked(True)
-        self.clipCheckBox.setVisible(bool(self._same_partial))
-        layout.addWidget(self.clipCheckBox)
-
-        # 2. Containment / identical.
+        # 1. Containment / identical.
         containment_header = QHBoxLayout()
         self.containmentLabel = QLabel(_tr("Contained plots"))
         self.containmentBulkCombo = QComboBox()
@@ -164,50 +153,23 @@ class OverlapReviewDialog(QDialog):
         layout.addLayout(containment_header)
         layout.addWidget(self.containmentTable)
 
-        # 3. Cross-NodeID partial overlaps.
-        cross_header = QHBoxLayout()
-        self.crossLabel = QLabel(_tr("Partial overlaps between different NodeIDs"))
-        self.bulkCombo = QComboBox()
-        self.bulkCombo.addItem(_tr("Set all to: —"), _BULK_NONE)
-        self.bulkCombo.addItem(_tr("Keep both"), _BULK_KEEP)
-        self.bulkCombo.addItem(_tr("Remove from smaller"), _BULK_SMALLER)
-        self.bulkCombo.addItem(_tr("Remove from larger"), _BULK_LARGER)
-        self.bulkCombo.currentIndexChanged.connect(self._apply_bulk_cross_action)
-        cross_header.addWidget(self.crossLabel)
-        cross_header.addStretch(1)
-        cross_header.addWidget(self.bulkCombo)
-
-        self.crossTable = self._make_table(
-            [
-                _tr("Plot A"),
-                _tr("NodeID"),
-                _tr("Area m²"),
-                _tr("Plot B"),
-                _tr("NodeID"),
-                _tr("Area m²"),
-                _tr("Overlap m²"),
-                _tr("% of smaller"),
-                _tr("Action"),
-            ],
-            len(self._cross_partial),
+        # 2. Partial overlaps, same NodeID (default: remove from the smaller plot).
+        (self.sameLabel, self.sameBulkCombo, self.sameTable) = self._add_partial_section(
+            layout,
+            _tr("Partial overlaps within the same NodeID"),
+            self._same_partial,
+            self._same_combos,
+            default_mode=_BULK_SMALLER,
         )
-        for row, f in enumerate(self._cross_partial):
-            self._fill_plot_cells(self.crossTable, row, 0, f.index_a)
-            self._fill_plot_cells(self.crossTable, row, 3, f.index_b)
-            self.crossTable.setItem(row, 6, self._number_item("{:.2f}".format(f.area)))
-            self.crossTable.setItem(row, 7, self._number_item("{:.2f}".format(f.pct_of_smaller)))
-            combo = QComboBox()
-            combo.addItem(_tr("Keep both"), KEEP)
-            combo.addItem(_tr("Remove overlap from A"), REMOVE_FROM_A)
-            combo.addItem(_tr("Remove overlap from B"), REMOVE_FROM_B)
-            self.crossTable.setCellWidget(row, 8, combo)
-            self._cross_combos.append(combo)
-        has_cross = bool(self._cross_partial)
-        self.crossLabel.setVisible(has_cross)
-        self.bulkCombo.setVisible(has_cross)
-        self.crossTable.setVisible(has_cross)
-        layout.addLayout(cross_header)
-        layout.addWidget(self.crossTable)
+
+        # 3. Partial overlaps, different NodeIDs (default: keep both).
+        (self.crossLabel, self.bulkCombo, self.crossTable) = self._add_partial_section(
+            layout,
+            _tr("Partial overlaps between different NodeIDs"),
+            self._cross_partial,
+            self._cross_combos,
+            default_mode=_BULK_KEEP,
+        )
 
         # 4. Disclaimer.
         disclaimer = QLabel(
@@ -322,35 +284,90 @@ class OverlapReviewDialog(QDialog):
         self.containmentBulkCombo.setCurrentIndex(0)
         self.containmentBulkCombo.blockSignals(False)
 
-    def _apply_bulk_cross_action(self, *_args):
-        """Set every cross-NodeID row from the bulk control; rows stay editable."""
-        mode = self.bulkCombo.currentData()
+    def _add_partial_section(self, layout, title, findings, combos, default_mode):
+        """Header (label + "Set all to") and table for one list of partial overlaps."""
+        header = QHBoxLayout()
+        label = QLabel(title)
+        bulk = QComboBox()
+        bulk.addItem(_tr("Set all to: —"), _BULK_NONE)
+        bulk.addItem(_tr("Keep both"), _BULK_KEEP)
+        bulk.addItem(_tr("Remove from smaller"), _BULK_SMALLER)
+        bulk.addItem(_tr("Remove from larger"), _BULK_LARGER)
+        header.addWidget(label)
+        header.addStretch(1)
+        header.addWidget(bulk)
+
+        table = self._make_table(
+            [
+                _tr("Plot A"),
+                _tr("NodeID"),
+                _tr("Area m²"),
+                _tr("Plot B"),
+                _tr("NodeID"),
+                _tr("Area m²"),
+                _tr("Overlap m²"),
+                _tr("% of smaller"),
+                _tr("Action"),
+            ],
+            len(findings),
+        )
+        for row, f in enumerate(findings):
+            self._fill_plot_cells(table, row, 0, f.index_a)
+            self._fill_plot_cells(table, row, 3, f.index_b)
+            table.setItem(row, 6, self._number_item("{:.2f}".format(f.area)))
+            table.setItem(row, 7, self._number_item("{:.2f}".format(f.pct_of_smaller)))
+            combo = QComboBox()
+            combo.addItem(_tr("Keep both"), KEEP)
+            combo.addItem(_tr("Remove overlap from A"), REMOVE_FROM_A)
+            combo.addItem(_tr("Remove overlap from B"), REMOVE_FROM_B)
+            combo.setCurrentIndex(combo.findData(self._partial_choice(f, default_mode)))
+            table.setCellWidget(row, 8, combo)
+            combos.append(combo)
+
+        bulk.currentIndexChanged.connect(
+            lambda _i, b=bulk, fs=findings, cs=combos: self._apply_bulk_partial_action(b, fs, cs)
+        )
+        has_rows = bool(findings)
+        label.setVisible(has_rows)
+        bulk.setVisible(has_rows)
+        table.setVisible(has_rows)
+        layout.addLayout(header)
+        layout.addWidget(table)
+        return label, bulk, table
+
+    def _partial_choice(self, f, mode):
+        """Row action for a bulk mode: keep, or remove from the smaller/larger plot."""
+        if mode == _BULK_KEEP:
+            return KEEP
+        area_a = self._plots.get(f.index_a, {}).get("area") or 0.0
+        area_b = self._plots.get(f.index_b, {}).get("area") or 0.0
+        a_is_smaller = area_a < area_b or (area_a == area_b and f.index_a > f.index_b)
+        remove_from_a = a_is_smaller if mode == _BULK_SMALLER else not a_is_smaller
+        return REMOVE_FROM_A if remove_from_a else REMOVE_FROM_B
+
+    def _apply_bulk_partial_action(self, bulk, findings, combos):
+        """Set every row of one partial table from its bulk control; rows stay editable."""
+        mode = bulk.currentData()
         if not mode:
             return
-        for row, f in enumerate(self._cross_partial):
-            if mode == _BULK_KEEP:
-                choice = KEEP
-            else:
-                area_a = self._plots.get(f.index_a, {}).get("area") or 0.0
-                area_b = self._plots.get(f.index_b, {}).get("area") or 0.0
-                a_is_smaller = area_a < area_b or (area_a == area_b and f.index_a > f.index_b)
-                remove_from_a = a_is_smaller if mode == _BULK_SMALLER else not a_is_smaller
-                choice = REMOVE_FROM_A if remove_from_a else REMOVE_FROM_B
-            combo = self._cross_combos[row]
-            combo.setCurrentIndex(combo.findData(choice))
+        for f, combo in zip(findings, combos):
+            combo.setCurrentIndex(combo.findData(self._partial_choice(f, mode)))
         # Back to "—" so a later bulk choice of the same value applies again.
-        self.bulkCombo.blockSignals(True)
-        self.bulkCombo.setCurrentIndex(0)
-        self.bulkCombo.blockSignals(False)
+        bulk.blockSignals(True)
+        bulk.setCurrentIndex(0)
+        bulk.blockSignals(False)
 
     # ------------------------------------------------------------------ #
 
     def results(self):
-        """``(clip_same_node, containment_actions, cross_node_actions)``.
+        """``(same_node_actions, containment_actions, cross_node_actions)``.
 
         Action dicts are keyed by ``(index_a, index_b)``.
         """
-        clip_same_node = bool(self._same_partial) and self.clipCheckBox.isChecked()
+        same_node_actions = {
+            (f.index_a, f.index_b): self._same_combos[row].currentData()
+            for row, f in enumerate(self._same_partial)
+        }
         containment_actions = {
             (f.index_a, f.index_b): self._containment_combos[row].currentData()
             for row, f in enumerate(self._containment)
@@ -359,4 +376,4 @@ class OverlapReviewDialog(QDialog):
             (f.index_a, f.index_b): self._cross_combos[row].currentData()
             for row, f in enumerate(self._cross_partial)
         }
-        return clip_same_node, containment_actions, cross_node_actions
+        return same_node_actions, containment_actions, cross_node_actions

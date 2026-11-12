@@ -6,6 +6,7 @@ Unit tests for polygon overlap detection (GH-12). Pure Shapely — no QGIS requi
 """
 
 import json
+import math
 import os
 import random
 import sys
@@ -457,6 +458,52 @@ class TestApplyFeatureFixes(unittest.TestCase):
             items, cross={(0, 1): "remove_from_a"}, skip_clip={0}
         )
         self.assertEqual((new, actions), ({}, {(0, 1): "skipped_z"}))
+
+    def test_same_node_per_pair_choices(self):
+        """A dict of per-pair choices replaces the all-or-nothing same-NodeID clip."""
+        big = box(0, 0, 10, 10)
+        small = box(8, 0, 14, 6)
+        items = [_item(0, big, "N1"), _item(1, small, "N1")]
+        _, (new, _, actions) = self._run(items, clip={(0, 1): "remove_from_a"})
+        self.assertEqual(actions, {(0, 1): "clipped_a"})
+        self.assertAlmostEqual(new[0].area, 100.0 - 12.0)
+        _, (new, _, actions) = self._run(items, clip={(0, 1): "remove_from_b"})
+        self.assertEqual(actions, {(0, 1): "clipped_b"})
+        self.assertAlmostEqual(new[1].area, 36.0 - 12.0)
+        _, (new, _, actions) = self._run(items, clip={(0, 1): "keep"})
+        self.assertEqual((new, actions), ({}, {(0, 1): "kept"}))
+        _, (new, _, actions) = self._run(items, clip={})
+        self.assertEqual((new, actions), ({}, {(0, 1): "kept"}))
+
+    def test_z_plot_is_clipped_and_keeps_z(self):
+        """Z plots are clipped; old vertices keep their Z, new ones take an existing Z."""
+        from shapely.geometry import Polygon
+
+        a = Polygon([(0, 0, 5), (10, 0, 6), (10, 10, 7), (0, 10, 8)])
+        b = Polygon([(8, 0, 1), (18, 0, 1), (18, 10, 1), (8, 10, 1)])
+        items = [_item(0, a, "N1"), _item(1, b, "N2")]
+        _, (new, _, actions) = self._run(items, cross={(0, 1): "remove_from_a"})
+        self.assertEqual(actions, {(0, 1): "clipped_a"})
+        clipped = new[0]
+        self.assertAlmostEqual(clipped.area, 80.0)
+        self.assertTrue(clipped.has_z)
+        coords = list(clipped.exterior.coords)
+        self.assertTrue(all(len(c) == 3 and not math.isnan(c[2]) for c in coords))
+        z_by_xy = {(c[0], c[1]): c[2] for c in coords}
+        self.assertEqual(z_by_xy[(0.0, 0.0)], 5)
+        self.assertEqual(z_by_xy[(0.0, 10.0)], 8)
+
+    def test_match_z(self):
+        from shapely.geometry import Polygon
+        from tract_geolocation_formatter.overlaps import _match_z
+
+        z_like = Polygon([(0, 0, 3), (1, 0, 4), (1, 1, 4)])
+        flat = Polygon([(0, 0), (2, 0), (2, 2)])
+        nan_z = Polygon([(0, 0, 9), (2, 0, float("nan")), (2, 2, 9)])
+        self.assertEqual([c[2] for c in _match_z(flat, z_like).exterior.coords], [3, 3, 3, 3])
+        self.assertEqual([c[2] for c in _match_z(nan_z, z_like).exterior.coords], [9, 3, 9, 9])
+        self.assertFalse(_match_z(nan_z, flat).has_z)
+        self.assertTrue(_match_z(MultiPolygon(), z_like).is_empty)
 
     def test_input_geometries_unchanged_and_deterministic(self):
         a = box(0, 0, 10, 10)

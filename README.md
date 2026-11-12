@@ -93,7 +93,7 @@ Overlapping plots are a common reason a dataset is rejected. Tick **Check polygo
 
 - **Parts of one plot** that overlap each other are dissolved into one shape, keeping the full plot area.
 - **Overlapping plots** (with the same NodeID, with different NodeIDs, or one inside another) are shown for review after the export. You can clip the overlap, delete a contained or duplicate plot, or keep both. Nothing is changed unless you apply the fixes.
-- Every changed plot is checked again, so a clip that leaves a plot too small is flagged `NEEDS_FIX`. Deleted plots are left out of every output. Plots with Z values are never clipped.
+- Every changed plot is checked again, so a clip that leaves a plot too small is flagged `NEEDS_FIX`. Deleted plots are left out of every output.
 
 **Results:** `<name>_overlaps.geojson` with one feature per overlap area (loaded into QGIS), the overlaps in the validation report CSV, and a count by type in the summary report.
 
